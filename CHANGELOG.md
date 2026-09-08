@@ -16,6 +16,12 @@ All notable user-facing changes to Rustwright are documented in this file.
 
 ### Changed
 
+- Started a living memory audit (`MEMORY_AUDIT.md`) for max and idle library
+  RSS. Retained network `post_data` / console arg strings now share the 8 KiB
+  CDP retention budget; screenshot path writes reuse the decoded buffer without
+  an extra clone; click-actionability polls no longer rebuild owned locator
+  script bodies each tick.
+
 - `Browser.new_page()` now creates a native ephemeral browser context for each
   page. Closing the page disposes its context, matching Playwright isolation.
 - Navigation internals now retain response bodies and drain console and

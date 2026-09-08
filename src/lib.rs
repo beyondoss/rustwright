@@ -11567,13 +11567,12 @@ true
 
             let main_result = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
                 r#"
 this.scrollIntoView();
 return this.dataset.mainWorldOverride === "observed";
-"#
-                .to_string(),
+"#,
                 Duration::from_millis(500),
             )
             .await
@@ -11582,14 +11581,14 @@ return this.dataset.mainWorldOverride === "observed";
 
             let frame_result = evaluate_locator_for_page(
                 page,
-                json!({
+                &json!({
                     "kind": "frame",
                     "frame_selector": "iframe",
                     "inner": {"kind": "css", "selector": "button"}
                 })
                 .to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -11670,7 +11669,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -11710,9 +11709,9 @@ return this.dataset.mainWorldOverride === "observed";
         let operations = async move {
             let action = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(250),
             )
             .await
@@ -11828,11 +11827,12 @@ return this.dataset.mainWorldOverride === "observed";
         }));
 
         let page = Arc::clone(&harness.page);
+        let locator_json = json!({"kind": "css", "selector": "#target"}).to_string();
         let action = evaluate_locator_for_page(
             page,
-            json!({"kind": "css", "selector": "#target"}).to_string(),
+            &locator_json,
             0,
-            "return true;".to_string(),
+            "return true;",
             Duration::from_millis(500),
         );
         let result_page = Arc::clone(&harness.page);
@@ -12075,9 +12075,9 @@ return this.dataset.mainWorldOverride === "observed";
 
             let first = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -12119,9 +12119,9 @@ return this.dataset.mainWorldOverride === "observed";
 
             let second = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -12318,7 +12318,7 @@ return this.dataset.mainWorldOverride === "observed";
         let operations = async move {
             resolve_locator_session(
                 Arc::clone(&page),
-                &json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                 OperationDeadline::new(Duration::from_millis(250)),
             )
             .await
@@ -12340,7 +12340,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -12366,7 +12366,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -16134,16 +16134,17 @@ return this.dataset.mainWorldOverride === "observed";
 
         let page = Arc::clone(&harness.page);
         let responder_page = Arc::clone(&harness.page);
+        let locator_json = json!({
+            "kind": "frame",
+            "frame_selector": "iframe",
+            "inner": {"kind": "css", "selector": "button"}
+        })
+        .to_string();
         let action = evaluate_locator_for_page(
             page,
-            json!({
-                "kind": "frame",
-                "frame_selector": "iframe",
-                "inner": {"kind": "css", "selector": "button"}
-            })
-            .to_string(),
+            &locator_json,
             0,
-            "return true;".to_string(),
+            "return true;",
             Duration::from_millis(750),
         );
         let responder = async move {
@@ -23010,6 +23011,81 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(log.retained_bytes <= CDP_EVENT_LOG_MAX_BYTES);
         assert_eq!(log.cursor_after_event(0, &live), 1);
     }
+
+    #[test]
+    fn retained_network_and_console_payloads_share_the_string_budget() {
+        let post = "p".repeat(CDP_RETAINED_STRING_MAX_BYTES * 2);
+        let request = request_from_event(
+            &json!({
+                "params": {
+                    "requestId": "req-1",
+                    "loaderId": "loader-1",
+                    "frameId": "frame-1",
+                    "timestamp": 1.0,
+                    "wallTime": 1.0,
+                    "type": "Fetch",
+                    "documentURL": "https://example.test/",
+                    "request": {
+                        "url": "https://example.test/submit",
+                        "method": "POST",
+                        "headers": {},
+                        "postData": post,
+                        "postDataEntries": [{ "bytes": post }],
+                    }
+                }
+            }),
+            None,
+        )
+        .expect("request snapshot");
+        assert_eq!(
+            request
+                .get("post_data")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        assert_eq!(
+            request
+                .pointer("/post_data_entries/0/bytes")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        assert_eq!(
+            console_arg_value(&json!({ "type": "string", "value": post })),
+            Value::String("p".repeat(CDP_RETAINED_STRING_MAX_BYTES))
+        );
+
+        let mut log = CdpEventLog::new();
+        let live = log.push(json!({
+            "sessionId": "page-session",
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": "req-1",
+                "request": {
+                    "url": "https://example.test/submit",
+                    "method": "POST",
+                    "postData": post,
+                }
+            }
+        }));
+        assert_eq!(
+            live.pointer("/params/request/postData")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES * 2)
+        );
+        let retained = log.entries_since(0);
+        assert_eq!(
+            retained[0]
+                .1
+                .pointer("/params/request/postData")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+    }
+
     #[test]
     fn cdp_event_log_tombstones_payloads_that_remain_oversized_after_compaction() {
         let mut log = CdpEventLog::new();
@@ -25579,6 +25655,90 @@ fn compact_retained_cdp_value(value: &mut Value) {
     }
 }
 
+fn truncate_retained_string(text: &str) -> String {
+    if text.len() <= CDP_RETAINED_STRING_MAX_BYTES {
+        return text.to_owned();
+    }
+    let mut end = CDP_RETAINED_STRING_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+fn retained_json_string(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(text)) => Value::String(truncate_retained_string(text)),
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => Value::Null,
+    }
+}
+
+fn retained_post_data_entries(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Array(entries)) => {
+            let mut retained = Vec::with_capacity(entries.len().min(CDP_RETAINED_ARRAY_MAX_ITEMS));
+            for entry in entries.iter().take(CDP_RETAINED_ARRAY_MAX_ITEMS) {
+                let mut entry = entry.clone();
+                if let Some(object) = entry.as_object_mut() {
+                    if let Some(Value::String(text)) = object.get_mut("bytes") {
+                        *text = truncate_retained_string(text);
+                    } else {
+                        for value in object.values_mut() {
+                            compact_retained_cdp_value(value);
+                        }
+                    }
+                } else {
+                    compact_retained_cdp_value(&mut entry);
+                }
+                retained.push(entry);
+            }
+            Value::Array(retained)
+        }
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => Value::Null,
+    }
+}
+
+/// Drop payloads that are already mirrored in page-owned stores (network POST
+/// bodies, console args) so the browser-lifetime event log cannot idle-retain
+/// duplicates even when the raw event is under the per-entry byte budget.
+fn strip_retained_heavy_payloads(event: &mut Value) {
+    let method = event
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match method.as_str() {
+        "Network.requestWillBeSent" => {
+            if let Some(request) = event.pointer_mut("/params/request") {
+                if let Some(object) = request.as_object_mut() {
+                    if let Some(Value::String(text)) = object.get_mut("postData") {
+                        *text = truncate_retained_string(text);
+                    }
+                    if let Some(entries) = object.get_mut("postDataEntries") {
+                        *entries = retained_post_data_entries(Some(entries));
+                    }
+                }
+            }
+        }
+        "Runtime.consoleAPICalled" => {
+            if let Some(args) = event.pointer_mut("/params/args") {
+                compact_retained_cdp_value(args);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct CountingWriter {
     bytes: usize,
 }
@@ -25740,6 +25900,7 @@ fn retained_cdp_event_params(method: &str, params: &Value) -> Option<Value> {
 }
 
 fn compact_retained_cdp_event(mut event: Value) -> (Value, usize) {
+    strip_retained_heavy_payloads(&mut event);
     let original_size = retained_cdp_event_size(&event);
     if original_size <= CDP_EVENT_LOG_MAX_ENTRY_BYTES {
         return (event, original_size);
@@ -34426,16 +34587,16 @@ async fn evaluate_handle_locator_resolution(
 
 async fn evaluate_locator_for_page(
     page: Arc<PageInner>,
-    locator_json: String,
+    locator_json: &str,
     index: usize,
-    body: String,
+    body: &str,
     timeout: Duration,
 ) -> RwResult<String> {
     let deadline = OperationDeadline::new(timeout);
     for attempt in 0..=1 {
         let resolution =
-            resolve_locator_session(Arc::clone(&page), &locator_json, deadline).await?;
-        let expression = locator_script(&resolution.locator_json, index, &body);
+            resolve_locator_session(Arc::clone(&page), locator_json, deadline).await?;
+        let expression = locator_script(&resolution.locator_json, index, body);
         match evaluate_locator_resolution(&page, &resolution, &expression, deadline, Duration::ZERO)
             .await
         {
@@ -38088,9 +38249,10 @@ async fn frame_viewport_offset_for_page(
         } else {
             json!({ "kind": "nth", "base": owner_spec, "index": owner_index })
         };
+        let scoped_owner_json = scoped_owner_spec.to_string();
         let json = evaluate_locator_for_page(
             Arc::clone(&page),
-            scoped_owner_spec.to_string(),
+            &scoped_owner_json,
             0,
             r#"
 if (!el) return null;
@@ -38099,8 +38261,7 @@ return {
   x: rect.x + (Number(el.clientLeft) || 0),
   y: rect.y + (Number(el.clientTop) || 0)
 };
-"#
-            .to_string(),
+"#,
             timeout,
         )
         .await?;
@@ -38130,9 +38291,9 @@ async fn page_click_actionable_wait_async(
         let command_timeout = action_poll_timeout(timeout_ms, true, remaining);
         let evaluation = evaluate_locator_for_page(
             Arc::clone(&page),
-            locator_json.clone(),
+            &locator_json,
             index,
-            body.clone(),
+            &body,
             command_timeout,
         )
         .await;
@@ -38640,17 +38801,25 @@ async fn page_screenshot_async(
         }
     }
     let result = capture_result?;
-    let base64_data = result.get("data").and_then(Value::as_str).unwrap_or("");
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_data)
-        .map_err(|error| RwError::Message(error.to_string()))?;
+    let bytes = {
+        let base64_data = result.get("data").and_then(Value::as_str).unwrap_or("");
+        base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .map_err(|error| RwError::Message(error.to_string()))?
+    };
+    // Drop the CDP reply before returning so base64 JSON and decoded bytes do
+    // not stack. Write any path from the same Vec without cloning the frame.
+    drop(result);
     if let Some(path) = path {
-        let path_bytes = bytes.clone();
-        tokio::task::spawn_blocking(move || std::fs::write(path, path_bytes))
-            .await
-            .map_err(|error| RwError::Message(error.to_string()))??;
+        Ok(tokio::task::spawn_blocking(move || {
+            std::fs::write(path, &bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(|error| RwError::Message(error.to_string()))??)
+    } else {
+        Ok(bytes)
     }
-    Ok(bytes)
 }
 
 async fn page_close_cleanup(
@@ -39051,9 +39220,9 @@ impl PyPage {
             async move {
                 let json = evaluate_locator_for_page(
                     page,
-                    locator_json,
+                    &locator_json,
                     index,
-                    "return el ? (el.innerText || el.textContent || '') : null;".to_string(),
+                    "return el ? (el.innerText || el.textContent || '') : null;",
                     timeout,
                 )
                 .await?;
@@ -41059,7 +41228,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
             } else {
                 let browser = Arc::clone(&page.browser);
                 browser.block_on(async move {
-                    evaluate_locator_for_page(page, locator_json, index, script.body, timeout).await
+                    evaluate_locator_for_page(page, &locator_json, index, &script.body, timeout).await
                 })
             }
         })
@@ -43695,7 +43864,7 @@ impl PyPage {
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let browser = Arc::clone(&page.browser);
         browser.block_on(async move {
-            evaluate_locator_for_page(page, locator_json, index, body, timeout).await
+            evaluate_locator_for_page(page, &locator_json, index, &body, timeout).await
         })
     }
 
@@ -46550,7 +46719,7 @@ return waitForScrollSettle();
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let browser = Arc::clone(&page.browser);
         browser.block_on_raw(cancelable(cancel.cloned(), async move {
-            evaluate_locator_for_page(page, locator_json, index, body, timeout).await
+            evaluate_locator_for_page(page, &locator_json, index, &body, timeout).await
         }))
     }
 }
@@ -50720,7 +50889,7 @@ fn record_page_observation_event_with_ownership(
                     request_body: request
                         .get("postData")
                         .and_then(Value::as_str)
-                        .map(ToString::to_string),
+                        .map(truncate_retained_string),
                     response_headers: Vec::new(),
                     navigation_epoch: accepted_document_navigation_epoch
                         .unwrap_or_else(|| network.epoch_for_observation(event_sequence)),
@@ -56477,13 +56646,20 @@ fn console_arg_value(arg: &Value) -> Value {
         return Value::Null;
     }
     if let Some(value) = arg.get("value") {
-        return value.clone();
+        return match value {
+            Value::String(text) => Value::String(truncate_retained_string(text)),
+            other => {
+                let mut value = other.clone();
+                compact_retained_cdp_value(&mut value);
+                value
+            }
+        };
     }
     if let Some(value) = arg.get("unserializableValue").and_then(Value::as_str) {
-        return Value::String(value.to_string());
+        return Value::String(truncate_retained_string(value));
     }
     if let Some(value) = arg.get("description").and_then(Value::as_str) {
-        return Value::String(value.to_string());
+        return Value::String(truncate_retained_string(value));
     }
     Value::Null
 }
@@ -56509,8 +56685,8 @@ fn route_from_event(event: &Value) -> Option<Value> {
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
         "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
-        "post_data": request.get("postData").cloned().unwrap_or(Value::Null),
-        "post_data_entries": request.get("postDataEntries").cloned().unwrap_or(Value::Null),
+        "post_data": retained_json_string(request.get("postData")),
+        "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
     }))
 }
 
@@ -56534,8 +56710,8 @@ fn request_from_event(event: &Value, redirected_from: Option<Value>) -> Option<V
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
         "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
-        "post_data": request.get("postData").cloned().unwrap_or(Value::Null),
-        "post_data_entries": request.get("postDataEntries").cloned().unwrap_or(Value::Null),
+        "post_data": retained_json_string(request.get("postData")),
+        "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
         "redirect_hop": redirect_hop,
         "timing": Value::Null,
     });
