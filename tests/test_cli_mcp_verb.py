@@ -58,7 +58,7 @@ def test_mcp_missing_binary_prints_install_help_without_traceback(
         "cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp"
         in captured.err
     )
-    assert len(captured.err.splitlines()) == 2
+    assert len(captured.err.splitlines()) == 1
     assert "Traceback" not in captured.err
 
 

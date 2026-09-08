@@ -255,7 +255,7 @@ binding-specific native mapping. This behavior is compatibility-stable.
 Identity-preserving bindings use `rw_wire_graph_parse`. They allocate all
 host containers by dense node id before they fill array and object edges.
 This preserves repeated references, cycles, and object entry order. PyO3 and
-napi use the same core graph directly. None of these adapters may substitute
+the Python PyO3 adapter uses the same core graph directly. None of these adapters may substitute
 the flattened `rw_decode_wire` compatibility path.
 
 The core serializer is the single source of truth for this vocabulary; a
@@ -282,7 +282,7 @@ Any behavior expressible as a pure function of JSON-in/JSON-out — launch and
 screenshot option normalization and defaulting, evaluate-wire parsing and
 decoding, timeout-precedence resolution, data-URL construction, and structural
 result comparison — is implemented once in `rustwright-core` and exposed
-through the C ABI and native PyO3/napi adapters.
+through the C ABI and the native PyO3 adapter.
 
 The legacy C ABI decoder intentionally remains a flattened JSON compatibility
 path. Native graph adapters use core graph parsing to preserve host identity
@@ -334,7 +334,7 @@ untracked:
 
 Every directory ships two documented executable entrypoints:
 
-1. `smoke` mirrors `node/smoke.mjs`: launch headless Chromium, navigate to
+1. `smoke` launches headless Chromium, navigates to
    inline HTML containing a title, `#name`, `#go`, and `#message`; read the
    initial message; fill and click; read the changed message; evaluate the
    input value; screenshot; print a JSON record; and close page/browser.

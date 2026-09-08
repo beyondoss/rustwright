@@ -20,11 +20,10 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / ".benchmark-data" / "manifests" / "mind2web_tasks.json"
-DEFAULT_IMPLS = ["rustwright-py", "playwright", "rustwright-ts", "typescript-playwright", "typescript-puppeteer"]
+DEFAULT_IMPLS = ["rustwright-py", "playwright", "typescript-playwright", "typescript-puppeteer"]
 EXPERIMENTAL_IMPLS = ["rustwright-ts-cdp"]
 LEGACY_IMPL_ALIASES = {
     "rustwright": "rustwright-py",
-    "typescript-rustwright-binding": "rustwright-ts",
     "typescript-rustwright-cdp": "rustwright-ts-cdp",
 }
 
@@ -611,16 +610,9 @@ def run_node_adapter(
         env = {**os.environ, "RUSTWRIGHT_CDP_EXECUTABLE_PATH": executable}
         script = node_raw_cdp_adapter_code()
     elif implementation == "rustwright-ts":
-        node = find_node_executable(reference_path)
-        executable = benchmark_chromium_executable()
-        if not executable:
-            raise UnsupportedImplementation("no Chromium executable was found for TypeScript Rustwright binding benchmark")
-        env = {
-            **os.environ,
-            "RUSTWRIGHT_TS_BINDING_PATH": str(ROOT / "tools" / "rustwright_ts_binding.js"),
-            "RUSTWRIGHT_TS_EXECUTABLE_PATH": executable,
-        }
-        script = node_adapter_code("rustwright-binding")
+        raise UnsupportedImplementation(
+            "rustwright-ts binding was removed; use rustwright-py or rustwright-ts-cdp"
+        )
     else:
         raise UnsupportedImplementation(f"{implementation} has no Node adapter")
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as script_file:

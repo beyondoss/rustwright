@@ -9,17 +9,10 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python 3.9–3.14 + 3.15 pre-release](https://img.shields.io/badge/python-3.9%E2%80%933.14%20%2B%203.15%20pre--release-3776AB?logo=python&logoColor=white)](pyproject.toml)
 CPython 3.15 support is verified on 3.15.0rc1 and remains pre-release; CI tracks 3.15-dev until GA.
-[![npm](https://img.shields.io/npm/v/rustwright?logo=npm&label=npm)](https://www.npmjs.com/package/rustwright)
 [![Chromium only](https://img.shields.io/badge/browser-Chromium-4285F4?logo=googlechrome&logoColor=white)](#limitations)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fG2XXEuQX3)
-[![PyPI downloads](https://img.shields.io/pypi/dw/rustwright?logo=pypi&logoColor=white&label=pypi%20downloads)](https://pypi.org/project/rustwright/)
-[![npm downloads](https://img.shields.io/npm/dw/rustwright?logo=npm&label=npm%20downloads)](https://www.npmjs.com/package/rustwright)
 [![crates.io downloads](https://img.shields.io/crates/dr/rustwright?logo=rust&label=crates.io%20recent%20downloads)](https://crates.io/crates/rustwright)
 [![rustwright-core downloads](https://img.shields.io/crates/dr/rustwright-core?logo=rust&label=rustwright-core%20recent%20downloads)](https://crates.io/crates/rustwright-core)
-[![gem downloads](https://img.shields.io/gem/dt/rustwright?logo=rubygems&logoColor=white&label=gem%20downloads)](https://rubygems.org/gems/rustwright)
-[![NuGet downloads](https://img.shields.io/nuget/dt/Rustwright?logo=nuget&label=nuget%20downloads)](https://www.nuget.org/packages/Rustwright/)
-[![Maven Central](https://img.shields.io/maven-central/v/io.github.skyvern-ai/rustwright?logo=apachemaven&label=maven%20central)](https://central.sonatype.com/artifact/io.github.skyvern-ai/rustwright)
-<!-- The MCP npm package (rustwright-mcp) publishes on the separate mcp-npm-v* tag family, not the v* release tag — only add its npm/dw badge once that tag has shipped. -->
 
 </div>
 
@@ -27,7 +20,7 @@ CPython 3.15 support is verified on 3.15.0rc1 and remains pre-release; CI tracks
 
 ## What is Rustwright?
 
-Rustwright is a browser automation library for Python and Node.js that keeps the Playwright API you already know but drives Chromium from a **native Rust engine** speaking raw [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) — no driver subprocess in the path.
+Rustwright is a browser automation library for Python that keeps the Playwright API you already know but drives Chromium from a **native Rust engine** speaking raw [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) — no driver subprocess in the path.
 
 ```text
 playwright-python:  your code ──pipe──► Node driver ──CDP──► Chromium
@@ -41,7 +34,9 @@ Rustwright is interoperable with Playwright — install it, change one import, a
 **Python**
 
 ```bash
-pip install rustwright
+# from a source checkout
+python -m pip install -U pip maturin
+maturin develop --release
 python -m rustwright install chromium
 ```
 
@@ -56,31 +51,6 @@ python -m rustwright install chromium
       print(page.title())
       browser.close()
 ```
-
-**Node.js** (experimental)
-
-Install from npm:
-
-```bash
-npm install rustwright
-```
-
-The Node binding drives an existing Chromium/Chrome — point Rustwright at it with `RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM`. Prefer to build from source? `git clone` the repo and run `npm install && npm run build` in `node/`.
-
-```diff
-- import { chromium } from 'playwright';
-+ import { chromium } from 'rustwright';
-
-  const browser = await chromium.launch();
-  const page = await browser.newPage();
-  await page.goto('https://example.com');
-  console.log(await page.title());
-  await browser.close();
-```
-
-See the network-independent [`examples/quickstart.js`](examples/quickstart.js) example. After building the Node binding from source, run it from the repository root with `node examples/quickstart.js`.
-
-Only a subset of the API surface is bridged — see [Limitations](#limitations).
 
 **CLI** (agent-focused)
 
@@ -115,11 +85,11 @@ server, use the standalone [`rustwright-mcp`](mcp/) package.
 - **No Playwright automation fingerprint.** The driver never loads, so its signatures never appear. See [Automation detection](#automation-detection).
 - **Trusted input.** Clicks and typing always use real CDP input events (`Input.dispatchMouseEvent`), not synthetic `element.click()` DOM calls.
 - **Cross-origin iframes (OOPIF).** Auto-attaches out-of-process iframe targets with flattened CDP sessions and routes `frame_locator()` across origins.
-- **One engine, two languages.** The same Rust core backs the Python and Node bindings.
+- **One engine, Python API.** The same Rust core backs the Python binding, CLI, and MCP server.
 
 ## How it works
 
-One Rust core — an async CDP client built on Tokio (WebSocket, with opt-in Unix-pipe transport) — talks to Chromium directly, and thin [PyO3](https://pyo3.rs) (Python) and [napi-rs](https://napi.rs) (Node) bindings expose it in-process. The two-line diagram above is the entire architecture.
+One Rust core — an async CDP client built on Tokio (WebSocket, with opt-in Unix-pipe transport) — talks to Chromium directly, and a thin [PyO3](https://pyo3.rs) binding exposes it in-process to Python. The two-line diagram above is the entire architecture.
 
 Already have a Chromium/Chrome binary? Point Rustwright at it with `RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM`.
 
@@ -142,12 +112,12 @@ From source (needs a Rust toolchain):
 cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp
 ```
 
-This installs the server binary as `rustwright-mcp`. An npm package (`rustwright-mcp`,
-prebuilt binaries via `npx rustwright-mcp`) is on the way.
+This installs the server binary as `rustwright-mcp`.
 
 If Chrome or Chromium is already installed, point Rustwright at it with
 `RUSTWRIGHT_CHROMIUM` (or `CHROME` / `CHROMIUM`). Otherwise download one with
-`pip install rustwright && python -m rustwright install chromium`.
+`python -m rustwright install chromium` from a source checkout built with
+maturin.
 
 #### Fastest path
 
@@ -186,17 +156,13 @@ Open `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS 
 | If... | Do this |
 |---|---|
 | You already have Chrome/Chromium | Set `RUSTWRIGHT_CHROMIUM` (or `CHROME` / `CHROMIUM`) to its executable in the server's `env`. |
-| You do not have a browser installed | `pip install rustwright && python -m rustwright install chromium` — the server finds the downloaded browser automatically. |
+| You do not have a browser installed | Build the Python package from source (`maturin develop --release`) and run `python -m rustwright install chromium` — the server finds the downloaded browser automatically. |
 | Screenshots are too large to inline | Tune `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES`; oversized captures fall back to a temp-file path instead of inline image content. |
 
 See [`mcp/README.md`](mcp/README.md) for the full tool list and
 configuration. Setting up via an AI agent? Tell it to fetch
 `https://raw.githubusercontent.com/Skyvern-AI/rustwright/HEAD/mcp/README.md`
 and follow it.
-
-> The earlier Python MCP server is deprecated: it stays in place until the
-> native server reaches full tool parity, but new capabilities land in
-> `mcp/` only.
 
 ### CLI — drive a browser from your shell
 
@@ -205,7 +171,7 @@ Drive one persistent Chromium session straight from the `rustwright` command, wi
 #### Try it in 60 seconds
 
 ```bash
-pip install rustwright
+maturin develop --release
 python -m rustwright install chromium
 
 rustwright open example.com
@@ -261,7 +227,7 @@ async def main():
 asyncio.run(main())
 ```
 
-> Remote sessions are Python-only for now — Rustwright's Node binding doesn't support `connect_over_cdp` yet (it's on the [Roadmap](#roadmap)).
+> Remote sessions are Python-only.
 
 ## Automation detection
 
@@ -299,7 +265,7 @@ On memory, a [form-fill diagnostic](BENCHMARK.md#client-memory-form-fill-diagnos
 
 | | Rustwright | playwright-python | Puppeteer | Patchright |
 |---|---|---|---|---|
-| **API** | Playwright-shaped (Py + Node) | Official Python Playwright | JS/TS Puppeteer | Playwright drop-in fork |
+| **API** | Playwright-shaped (Python) | Official Python Playwright | JS/TS Puppeteer | Playwright drop-in fork |
 | **Engine / transport** | Rust core, raw CDP | Python → Node driver | Node over CDP | Patched PW driver |
 | **In-process engine (no driver subprocess)** | ✅ | ❌ bundled Node driver | ✅ Node is the runtime | ❌ Playwright-style driver |
 | **Browsers** | Chromium only | Chromium, Firefox, WebKit | Chrome, Firefox | Chromium-based |
@@ -317,7 +283,6 @@ See [`LIMITATIONS.md`](LIMITATIONS.md) for detail.
 - **Alpha** — API shape covered; full **behavioral** parity not yet proven.
 - **API coverage** — ~96% of Playwright's Python sync API (**515 of 536** methods; **411** exercised by the shared parity registry); the async API provides **488 of 536**. Full report: [`docs/PARITY.md`](docs/PARITY.md).
 - **Chromium only** — Firefox and WebKit error explicitly.
-- **Node bindings are early** — a subset of the surface is bridged (`launch`, `newPage`, `goto`, `click`, `fill`, `title`, `textContent`, `evaluate`, `screenshot`, `close`); contexts, routing, tracing, and locators are Python-only for now.
 - **Async concurrency (Python)** — the async API wraps the sync engine via threads; recommended for **≈≤25 concurrent workflows/process**, not high fan-out.
 - **OOPIF** — residual gaps in non-main-frame `JSHandle` follow-ups and drag/screenshot/bounding-box.
 - **Automation detection is partial** — 3 of 4 public fingerprint targets clean in local runs (CreepJS still detects headless). **No undetectability promise.**
@@ -325,17 +290,14 @@ See [`LIMITATIONS.md`](LIMITATIONS.md) for detail.
 ## Roadmap
 
 - [ ] **Kotlin binding** — idiomatic Kotlin wrapper (Kotlin/JVM can already consume the Java FFM binding)
-- [ ] Grow the new language bindings beyond the alpha subset (contexts, routing, locators)
+- [ ] Grow the language bindings beyond the alpha subset (contexts, routing, locators)
 - [x] **Rustwright MCP server** — expose browser automation as tools for MCP-compatible AI agents ([mcp/](mcp/))
 - [ ] CI / Testbox-backed benchmark evidence
-- [ ] Broaden the Node.js surface (contexts, routing, locators)
 - [ ] Close remaining OOPIF gaps
 
 Recently shipped:
 
 - [x] **Language bindings (alpha)** — Go, Java, C#/.NET, Ruby, and PHP over a shared C ABI, plus a native Rust API ([`bindings/CONTRACT.md`](bindings/CONTRACT.md)); cross-language equivalence gated in CI
-- [x] Python package published to PyPI
-- [x] Node.js binding published to npm
 - [x] Native async engine over the Tokio CDP core
 - [x] OOPIF auto-attach with flattened CDP sessions
 - [x] 515/515 shared parity suite green against real Playwright
@@ -345,7 +307,7 @@ Firefox and WebKit are **not planned** — Rustwright is deliberately Chromium-o
 
 ## Contributing
 
-Rustwright is Rust + Python + Node. `cargo` builds the engine; `maturin develop --release` installs the Python package; `cd node && npm run build` builds the Node addon; the Python suite exercises the engine against real Chromium. Full Docker gate: **1,046 tests pass** (6 skipped), plus **515/515** shared parity cases run against real Playwright; CI (`test.yml`) runs a fast representative subset on every PR.
+Rustwright is Rust + Python. `cargo` builds the engine; `maturin develop --release` installs the Python package; the Python suite exercises the engine against real Chromium. Full Docker gate: **1,046 tests pass** (6 skipped), plus **515/515** shared parity cases run against real Playwright; CI (`test.yml`) runs a fast representative subset on every PR.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for build details and the code-layout reality.
 

@@ -2,7 +2,6 @@
 """Update and verify Rustwright's shared package version."""
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -17,7 +16,6 @@ SEMVER = re.compile(
 SOURCE_FILES = {
     "pyproject.toml": (ROOT / "pyproject.toml", "project"),
     "Cargo.toml": (ROOT / "Cargo.toml", "package"),
-    "node/Cargo.toml": (ROOT / "node/Cargo.toml", "package"),
 }
 RUNTIME_VERSION_FIELDS = (
     (
@@ -125,9 +123,6 @@ def source_versions() -> Dict[str, str]:
         label: toml_version(path, section)
         for label, (path, section) in SOURCE_FILES.items()
     }
-    versions["node/package.json"] = json.loads(
-        (ROOT / "node/package.json").read_text()
-    )["version"]
     for label, path, pattern in RUNTIME_VERSION_FIELDS:
         runtime_versions = pattern.findall(path.read_text())
         if len(runtime_versions) != 1:
@@ -163,12 +158,6 @@ def replace_toml_version(path: Path, section: str, version: str) -> None:
     path.write_text("".join(lines))
 
 
-def replace_json_version(path: Path, version: str) -> None:
-    data = json.loads(path.read_text())
-    data["version"] = version
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-
-
 def replace_runtime_version(version: str) -> None:
     updated_files = {}  # type: Dict[Path, str]
     for label, path, pattern in RUNTIME_VERSION_FIELDS:
@@ -188,24 +177,20 @@ def lock_versions() -> Dict[str, str]:
     package = {}  # type: Dict[str, str]
     for line in (ROOT / "Cargo.lock").read_text().splitlines():
         if line.strip() == "[[package]]":
-            if package.get("name") in {"rustwright-core", "rustwright-node"}:
+            if package.get("name") == "rustwright-core":
                 selected[package["name"]] = package.get("version", "")
             package = {}
             continue
         field_match = re.match(r'^(name|version) = "([^"]+)"$', line)
         if field_match:
             package[field_match.group(1)] = field_match.group(2)
-    if package.get("name") in {"rustwright-core", "rustwright-node"}:
+    if package.get("name") == "rustwright-core":
         selected[package["name"]] = package.get("version", "")
-    if set(selected) != {"rustwright-core", "rustwright-node"}:
+    if set(selected) != {"rustwright-core"}:
         raise RuntimeError(f"missing Rustwright packages in Cargo.lock: {selected}")
 
-    node_lock = json.loads((ROOT / "node/package-lock.json").read_text())
     return {
         "Cargo.lock rustwright-core": selected["rustwright-core"],
-        "Cargo.lock rustwright-node": selected["rustwright-node"],
-        "node/package-lock.json": node_lock["version"],
-        'node/package-lock.json packages[""]': node_lock["packages"][""]["version"],
     }
 
 
@@ -249,11 +234,10 @@ def main() -> int:
 
         for path, section in SOURCE_FILES.values():
             replace_toml_version(path, section, target)
-        replace_json_version(ROOT / "node/package.json", target)
         replace_runtime_version(target)
         require_one_version(source_versions(), target)
         print(f"Updated Rustwright source manifests from {current} to {target}")
-        print("Regenerate Cargo.lock and node/package-lock.json before --check")
+        print("Regenerate Cargo.lock before --check")
         return 0
     except (KeyError, OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

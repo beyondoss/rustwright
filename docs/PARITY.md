@@ -779,33 +779,6 @@ Missing async exports: `FormData`, `ScreencastFrame`, `ScreencastSize`, `Virtual
 - `UnknownOutcomeError` is a Rustwright safety extension. Compatibility shims intentionally do not export it.
 - The implementation still has large monolithic files. A module split is planned before beta.
 
-## Node.js subset
-
-This table is parsed from `node/README.md`; it does not infer capabilities from the native binding.
-
-| Surface | Status |
-| --- | --- |
-| `chromium.launch()` | ✅ bridged |
-| `browser.newPage()` | ✅ bridged |
-| `page.goto()` | ✅ bridged |
-| `page.click()` | ✅ bridged |
-| `page.fill()` | ✅ bridged |
-| `page.title()` | ✅ bridged |
-| `page.textContent()` | ✅ bridged |
-| `page.evaluate()` | ✅ bridged |
-| `page.screenshot()` | ✅ bridged |
-| `page.close()` | ✅ bridged |
-| `browser.close()` | ✅ bridged |
-| browser contexts | ❌ not yet bridged |
-| routes | ❌ not yet bridged |
-| downloads | ❌ not yet bridged |
-| tracing | ❌ not yet bridged |
-| workers | ❌ not yet bridged |
-| event waiters | ❌ not yet bridged |
-| JS handles | ❌ not yet bridged |
-| locators as first-class objects | ❌ not yet bridged |
-| Firefox | ❌ not yet bridged |
-| WebKit | ❌ not yet bridged |
 
 ## Methodology
 
@@ -816,5 +789,5 @@ This table is parsed from `node/README.md`; it does not infer capabilities from 
 - Exercise detection is conservative static analysis. It propagates `Page` and `Playwright` case parameters through assignments, reference return annotations, property chains, collection indexing, local helper calls, callback annotations, and literal event names. A member becomes green only when its receiver resolves to one reference class. Dynamic `getattr`, aliases returned through untyped helpers, and callbacks with ambiguous receiver types remain yellow even if a case reaches them at runtime.
 - 4 call site(s) had more than one plausible reference receiver class and were left uncredited rather than guessed.
 - A green mark means the shared suite invokes or reads the member while running the same registered case against real Playwright and Rustwright. It does not prove all options, errors, events, browser engines, or edge cases match.
-- The limitations and Node.js sections are parsed from `LIMITATIONS.md` and `node/README.md` on each run.
+- The limitations section is parsed from `LIMITATIONS.md` on each run.
 - Source digest (case registry, canonical runner, parity test, limitations, Node README): `4f0f11f4960a4451`.

@@ -55,7 +55,6 @@ def test_validation_missing_binary_is_clean_two_line_error(
     assert captured.err.splitlines() == [
         "rustwright mcp requires the native rustwright-mcp server binary; "
         "install it with: cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp",
-        "or install the rustwright-mcp npm package once it is published",
     ]
     assert "Traceback" not in captured.err
 
