@@ -139,38 +139,15 @@ Local fingerprint runs — default Playwright failed webdriver/headless checks t
 
 ## Benchmarks
 
-### Client memory vs playwright-python
+Rustwright's **client** footprint is about **4× smaller** than
+playwright-python's: median peak PSS **28 MB vs 110 MB (−75%)** on a remote-CDP
+form-fill suite (Chromium off-box; smaller in every case). playwright-python
+pays for a bundled Node driver; Rustwright speaks CDP in-process, so that cost
+is gone. With a local Chromium, whole-process memory is still browser-dominated
+and roughly comparable.
 
-On a remote-CDP form-fill suite (browser off-box so Chromium is not in the
-sample), Rustwright's **client** peak PSS was about **4× smaller** than
-playwright-python's — median **28 MB vs 110 MB (−75%)**, smaller in every case
-(per-case range 25–69 vs 86–152 MB). That is the part the library controls:
-Rustwright speaks CDP in-process; playwright-python keeps a bundled Node driver
-(~102 MB of the older single-pair client stack). Whole-process memory with a
-local Chromium is still Chromium-dominated and roughly comparable.
-
-Source: [`benchmarks/form_fill/RESULTS.md`](benchmarks/form_fill/RESULTS.md)
-(cloud CDP, 2026-07-16; 182/182 sessions). Older single-pair demos in
-[`BENCHMARK.md`](BENCHMARK.md#client-memory-form-fill-diagnostic) showed
-−69.6% / −71.0% on the same client-only basis; the cloud suite confirms and
-strengthens that finding at **−75%**.
-
-### MCP release binary (not a Playwright comparison)
-
-Host-safe `rustwright-mcp` packaging on linux x86_64
-([`MEMORY_BENCH.md`](MEMORY_BENCH.md)):
-
-| Step | Size |
-|---|---:|
-| Default mcp release | 16.776 MiB |
-| Fat LTO + strip + `panic=abort` | 7.748 MiB (−53.8%) |
-| PGO on fat LTO | 6.462 MiB (−16.7% vs LTO; −61.5% vs default) |
-
-PGO also dropped MCP process VmRSS median **6340 → 5416 KiB (−14.6%)** on the
-protocol train (no Chromium). Prefer `tools/build_mcp_pgo.sh` for native-host
-release assets.
-
-Broader suite methodology: [`BENCHMARK.md`](BENCHMARK.md).
+Details: [`benchmarks/form_fill/RESULTS.md`](benchmarks/form_fill/RESULTS.md).
+Methodology: [`BENCHMARK.md`](BENCHMARK.md).
 
 ## Alternatives
 
