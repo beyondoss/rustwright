@@ -29324,16 +29324,19 @@ impl ConsoleRecordStore {
     }
 
     fn trim_retained_idle(&mut self) {
-        let epoch = self.navigation_epoch;
-        let before = self.records.len();
-        self.records
-            .retain(|record| record.navigation_epoch == epoch);
-        let dropped = before.saturating_sub(self.records.len()) as u64;
-        if dropped > 0 {
-            self.evictions_total = self.evictions_total.saturating_add(dropped);
+        // Soft-trim must preserve prior-navigation records: MCP/API readers with
+        // `all: true` intentionally span epochs. Only drain when over the idle
+        // watermark; the hard capacity still applies on push.
+        while self.records.len() > NATIVE_CONSOLE_IDLE_MAX_ENTRIES {
+            let Some(evicted) = self.records.pop_front() else {
+                break;
+            };
+            *self
+                .evictions_by_epoch
+                .entry(evicted.navigation_epoch)
+                .or_default() += 1;
+            self.evictions_total = self.evictions_total.saturating_add(1);
         }
-        self.evictions_by_epoch
-            .retain(|stored_epoch, _| *stored_epoch == epoch);
     }
 
     fn reset_after_unreplayable(&mut self) {
@@ -29486,20 +29489,24 @@ impl NativeNetworkRecordStore {
     }
 
     fn trim_retained_idle(&mut self) {
-        let epoch = self.navigation_epoch;
-        let before = self.records.len();
-        self.records.retain(|entry| entry.record.navigation_epoch == epoch);
-        let dropped = before.saturating_sub(self.records.len());
-        if dropped > 0 {
-            *self.evictions_by_epoch.entry(epoch).or_default() += dropped as u64;
+        // Soft-trim must preserve prior-navigation records for cross-epoch
+        // readers. Only drain when over the idle watermark.
+        while self.records.len() > NATIVE_NETWORK_IDLE_MAX_ENTRIES {
+            let Some(entry) = self.records.pop_front() else {
+                break;
+            };
+            *self
+                .evictions_by_epoch
+                .entry(entry.record.navigation_epoch)
+                .or_default() += 1;
+            self.active_by_request
+                .retain(|_, index| *index != entry.record.index);
         }
         self.active_by_request.retain(|_, index| {
             self.records
                 .iter()
                 .any(|entry| entry.record.index == *index)
         });
-        self.evictions_by_epoch
-            .retain(|stored_epoch, _| *stored_epoch == epoch);
     }
 
     fn reset_after_unreplayable(&mut self) {
@@ -44904,6 +44911,10 @@ impl RustwrightFileChooser {
 /// counts so callers can report incomplete history without retaining an
 /// unbounded event log.
 pub const NATIVE_CONSOLE_RECORD_CAPACITY: usize = 1_024;
+/// Soft idle watermark for console soft-trim. Peak traffic may still fill up to
+/// `NATIVE_CONSOLE_RECORD_CAPACITY`; idle trim drains back to this without
+/// dropping prior-navigation epochs needed by `all: true` readers.
+const NATIVE_CONSOLE_IDLE_MAX_ENTRIES: usize = 256;
 
 /// Source location attached to a console record by Chromium.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44938,6 +44949,9 @@ pub struct RustwrightConsoleRecords {
 ///
 /// The ring evicts oldest-first and keeps per-navigation eviction counts.
 pub const NATIVE_NETWORK_RECORD_CAPACITY: usize = 1_024;
+/// Soft idle watermark for native network soft-trim. Preserves prior-navigation
+/// records the same way console soft-trim does.
+const NATIVE_NETWORK_IDLE_MAX_ENTRIES: usize = 256;
 
 /// Maximum response-body bytes returned by one native network detail read.
 ///
@@ -51330,6 +51344,23 @@ mod native_console_record_tests {
         assert_eq!(all.records.len(), NATIVE_CONSOLE_RECORD_CAPACITY - 1);
         assert_eq!(all.evicted, 2);
         assert!(store.read(true, false).records.is_empty());
+    }
+
+    #[test]
+    fn console_soft_trim_preserves_prior_navigation_records() {
+        let mut store = ConsoleRecordStore::default();
+        store.push(record("epoch-0"), None);
+        store.advance_navigation();
+        store.push(record("epoch-1"), None);
+        store.trim_retained_idle();
+        let all = store.read(true, false);
+        assert_eq!(all.records.len(), 2);
+        assert_eq!(all.records[0].text, "epoch-0");
+        assert_eq!(all.records[1].text, "epoch-1");
+        assert_eq!(all.evicted, 0);
+        let current = store.read(false, false);
+        assert_eq!(current.records.len(), 1);
+        assert_eq!(current.records[0].text, "epoch-1");
     }
 
     #[test]

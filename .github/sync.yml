@@ -56,9 +56,6 @@ Skyvern-AI/rustwright-cloud:
   - source: docs/
     dest: docs/
     deleteOrphaned: true
-  - source: node/
-    dest: node/
-    deleteOrphaned: true
   - source: python/
     dest: python/
     deleteOrphaned: true

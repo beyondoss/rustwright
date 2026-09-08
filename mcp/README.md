@@ -6,9 +6,7 @@ real Chromium browser through compact accessibility snapshots with element
 refs (`e1`, `e2`, …), trusted physical input for clicks, and inline PNG
 screenshots — no Python or Node runtime in the serving path.
 
-This is the canonical Rustwright MCP server. The earlier Python server is
-deprecated and will be removed once this server reaches full tool parity;
-new capabilities land here only.
+This is the canonical Rustwright MCP server.
 
 ## Install
 
@@ -18,9 +16,8 @@ From source (needs a Rust toolchain):
 cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp
 ```
 
-The server binary is installed as `rustwright-mcp`. An npm distribution
-(`rustwright-mcp`, prebuilt per-platform binaries, run with
-`npx rustwright-mcp`) is prepared under [`npm/`](npm/) and is on the way.
+The server binary is installed as `rustwright-mcp`. Prefer attaching prebuilt
+binaries to a GitHub Release when distributing outside a source checkout.
 
 ### Browser
 
@@ -29,7 +26,7 @@ The server launches Chromium itself:
 - Already have Chrome/Chromium? Set `RUSTWRIGHT_CHROMIUM` (or `CHROME` /
   `CHROMIUM`) to the executable path.
 - Otherwise download a managed build once with
-  `pip install rustwright && python -m rustwright install chromium` — the
+  `maturin develop --release && python -m rustwright install chromium` — the
   server finds it automatically.
 
 ## Configure your client
@@ -147,8 +144,7 @@ cargo test --locked
 ```
 
 The end-to-end tests launch Chromium; set `RUSTWRIGHT_CHROMIUM` if it is not
-discoverable. The [`npm/`](npm/) directory holds the npm packaging for the
-prebuilt-binary distribution.
+discoverable.
 
 ## License
 
