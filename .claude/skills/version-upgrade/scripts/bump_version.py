@@ -14,38 +14,9 @@ SEMVER = re.compile(
     r"(?:-((?:alpha|beta|rc)\.(?:0|[1-9]\d*)))?$"
 )
 SOURCE_FILES = {
-    "pyproject.toml": (ROOT / "pyproject.toml", "project"),
     "Cargo.toml": (ROOT / "Cargo.toml", "package"),
+    "rust-native/Cargo.toml": (ROOT / "rust-native/Cargo.toml", "package"),
 }
-RUNTIME_VERSION_FIELDS = (
-    (
-        "python/rustwright/sync_api.py HAR creator",
-        ROOT / "python/rustwright/sync_api.py",
-        re.compile(
-            r'("creator"\s*:\s*\{\s*"name"\s*:\s*"Rustwright"\s*,\s*'
-            r'"version"\s*:\s*")([^"]+)(")'
-        ),
-    ),
-    (
-        "python/rustwright/sync_api.py trace metadata",
-        ROOT / "python/rustwright/sync_api.py",
-        re.compile(r'("playwrightVersion"\s*:\s*"rustwright-)([^"]+)(")'),
-    ),
-    (
-        "python/rustwright/cli.py source fallback",
-        ROOT / "python/rustwright/cli.py",
-        re.compile(
-            r'(except metadata\.PackageNotFoundError:\s*\n\s*return ")([^"]+)(")'
-        ),
-    ),
-    (
-        "python/rustwright/_backend.py source fallback",
-        ROOT / "python/rustwright/_backend.py",
-        re.compile(
-            r'(except metadata\.PackageNotFoundError:\s*\n\s*return ")([^"]+)(\+local")'
-        ),
-    ),
-)
 
 
 def parse_version(value: str) -> Tuple[int, int, int, Tuple[str, ...]]:
@@ -119,18 +90,10 @@ def toml_version(path: Path, section: str) -> str:
 
 
 def source_versions() -> Dict[str, str]:
-    versions = {
+    return {
         label: toml_version(path, section)
         for label, (path, section) in SOURCE_FILES.items()
     }
-    for label, path, pattern in RUNTIME_VERSION_FIELDS:
-        runtime_versions = pattern.findall(path.read_text())
-        if len(runtime_versions) != 1:
-            raise RuntimeError(
-                f"expected one {label}, found {len(runtime_versions)}"
-            )
-        versions[label] = runtime_versions[0][1]
-    return versions
 
 
 def replace_toml_version(path: Path, section: str, version: str) -> None:
@@ -156,20 +119,6 @@ def replace_toml_version(path: Path, section: str, version: str) -> None:
             f"found {replacements}"
         )
     path.write_text("".join(lines))
-
-
-def replace_runtime_version(version: str) -> None:
-    updated_files = {}  # type: Dict[Path, str]
-    for label, path, pattern in RUNTIME_VERSION_FIELDS:
-        text = updated_files.get(path, path.read_text())
-        updated, replacements = pattern.subn(
-            lambda match: f"{match.group(1)}{version}{match.group(3)}", text
-        )
-        if replacements != 1:
-            raise RuntimeError(f"expected one {label}, found {replacements}")
-        updated_files[path] = updated
-    for path, text in updated_files.items():
-        path.write_text(text)
 
 
 def lock_versions() -> Dict[str, str]:
@@ -234,7 +183,6 @@ def main() -> int:
 
         for path, section in SOURCE_FILES.values():
             replace_toml_version(path, section, target)
-        replace_runtime_version(target)
         require_one_version(source_versions(), target)
         print(f"Updated Rustwright source manifests from {current} to {target}")
         print("Regenerate Cargo.lock before --check")

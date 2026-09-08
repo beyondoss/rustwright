@@ -1,136 +1,64 @@
 # Rustwright quickstart
 
-Rustwright is an alpha, Chromium-only project. Build the Python package from
-source with maturin, as shown below. Review the known
-[limitations](LIMITATIONS.md) before depending on it in production.
+Rustwright is an alpha, Chromium-only CDP engine exposed as **native CLI** and
+**MCP** binaries. Review [`LIMITATIONS.md`](LIMITATIONS.md) before production use.
 
-## Agent-assisted setup
+## Agent / MCP setup
 
-Paste this into Claude Code or Codex:
+Paste this into Claude Code or another agent:
 
-> Set up Rustwright for Python from https://github.com/Skyvern-AI/rustwright. If the repository already exists, use the current checkout; otherwise clone it. Read `QUICKSTART.md` and `LIMITATIONS.md` first. Use a repository-local `.venv` and do not change global Python packages or shell configuration. Verify Python 3.9–3.14 and CPython 3.15.0rc1 (pre-release; CI tracks 3.15-dev until GA) and Rust 1.85+, build with maturin, install Chromium, run `python examples/quickstart.py`, and report the exact output or blocker. Do not modify or commit source files.
+> Set up Rustwright MCP from https://github.com/beyondoss/rustwright. If the repository already exists, use the current checkout; otherwise clone it. Read `mcp/README.md` and `LIMITATIONS.md` first. Build `rustwright-mcp` with Cargo, point `RUSTWRIGHT_CHROMIUM` at Chrome/Chromium if needed, register the server with the MCP client, and verify `browser_navigate` to `https://example.com` returns a snapshot. Do not modify or commit source files.
 
-## Manual Python setup
-
-### 1. Install prerequisites
-
-You need:
-
-- [Git](https://git-scm.com/)
-- Python 3.9 through 3.14, or CPython 3.15.0rc1; Python 3.15 support remains
-  pre-release, and CI tracks 3.15-dev until GA
-- A [Rust toolchain](https://rustup.rs/) 1.85 or newer, including the platform
-  build tools recommended by `rustup`
-
-### 2. Clone and build
+### Install from source
 
 ```bash
-git clone https://github.com/Skyvern-AI/rustwright
+git clone https://github.com/beyondoss/rustwright
 cd rustwright
-python3 -m venv .venv   # Windows: use `python` · Debian/Ubuntu: requires the python3-venv package
+cargo install --path mcp
+# or: cargo run --manifest-path mcp/Cargo.toml
 ```
 
-Activate the virtual environment on macOS or Linux:
+Register with Claude Code:
 
 ```bash
-source .venv/bin/activate
+claude mcp add rustwright -- rustwright-mcp
 ```
 
-Or activate it in Windows PowerShell (if activation is blocked by the execution
-policy, run `Set-ExecutionPolicy -Scope Process Bypass` first):
+Or any MCP client:
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+```json
+{
+  "mcpServers": {
+    "rustwright": {
+      "command": "rustwright-mcp",
+      "env": {
+        "RUSTWRIGHT_CHROMIUM": "/path/to/chrome-or-chromium"
+      }
+    }
+  }
+}
 ```
 
-With the environment active, build and install Rustwright. The first build
-compiles the Rust engine and typically takes a few minutes:
+See [`mcp/README.md`](mcp/README.md) for tools and configuration.
+
+## CLI
 
 ```bash
-python -m pip install -U pip maturin
-maturin develop --release
+curl -fsSL https://raw.githubusercontent.com/beyondoss/rustwright/main/install.sh | sh
+# or from a checkout:
+cargo install --path cli
 ```
-
-### 3. Install Chromium and verify the build
-
-On **Debian/Ubuntu**, install Chromium's system libraries first (apt-based
-distros only; the command self-elevates with `sudo`). Other distros install the
-equivalent Chromium runtime packages through their own package manager, and
-macOS/Windows need none:
 
 ```bash
-python -m rustwright install-deps chromium   # Debian/Ubuntu only
+export RUSTWRIGHT_CHROMIUM=/path/to/chrome
+rustwright-cli open https://example.com
+rustwright-cli snapshot
+rustwright-cli close
 ```
 
-Then, on any platform, download Chromium and run the smoke example:
+See [`cli/README.md`](cli/README.md).
 
-```bash
-python -m rustwright install chromium
-python examples/quickstart.py
-```
+## Browser
 
-The example uses a local `data:` URL, so it makes no network requests once the
-build dependencies and Chromium are installed. A successful run prints:
-
-```text
-Rustwright works
-```
-
-If Chrome or Chromium is already installed, Rustwright can usually discover it.
-You can also set `RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM` to the browser
-executable before running the example.
-
-### 4. Try it in existing Playwright code
-
-For Python code that stays within Rustwright's supported surface, start by
-changing the import:
-
-```diff
-- from playwright.sync_api import sync_playwright
-+ from rustwright.sync_api import sync_playwright
-```
-
-The async entrypoint is available from `rustwright.async_api`. If changing
-imports is inconvenient, call `rustwright.enable_playwright_compat()` before
-importing `playwright`; this compatibility mode is opt-in and may evolve before
-beta.
-
-### 5. Drive a browser from an agent (CLI)
-
-The `rustwright` CLI keeps one browser alive across agent commands:
-
-```bash
-rustwright open example.com    # launch + navigate; prints an accessibility snapshot
-rustwright snapshot            # accessibility tree with refs (e1, e2, …)
-rustwright click e3            # act on an element by its ref
-rustwright --json snapshot     # one JSON object, for scripting
-rustwright close               # shut the session down
-```
-
-The CLI verbs and the MCP server's tools are the same surface.
-
-See [docs/agent-interfaces.md](docs/agent-interfaces.md) for the CLI verbs,
-configuration, threat model, and current scope. The MCP server for Rustwright
-is the native `rustwright-mcp` server — see [mcp/README.md](mcp/README.md)
-for install and client configuration. With its binary installed, `rustwright mcp`
-starts it.
-
-## Troubleshooting
-
-### `ModuleNotFoundError: No module named 'rustwright'`
-
-Activate the same virtual environment used for the build, then rerun:
-
-```bash
-maturin develop --release
-```
-
-### Rustwright cannot find Chromium
-
-Run `python -m rustwright install chromium`, install Chrome/Chromium manually,
-or set `RUSTWRIGHT_CHROMIUM` to the executable's absolute path.
-
-### Firefox or WebKit fails
-
-Rustwright deliberately supports Chromium only. Firefox and WebKit entrypoints
-return an explicit unsupported-browser error.
+Rustwright launches Chromium itself. Set `RUSTWRIGHT_CHROMIUM`, `CHROME`, or
+`CHROMIUM` to an executable when auto-discovery is not enough.

@@ -7,7 +7,8 @@ description: Prepare and validate a Rustwright version bump for GitHub Release a
 
 Bump the shared Rustwright version fields and prepare a release PR. This fork
 distributes prebuilt binaries as GitHub Release assets. It does not publish to
-PyPI or npm. Do not publish `rustwright-core` to crates.io from this skill.
+language package registries. Do not publish `rustwright-core` to crates.io from
+this skill.
 
 ## Arguments and mode
 
@@ -46,7 +47,7 @@ Read `$ARGUMENTS` for an exact SemVer version and an optional mode.
 ## 2. Prepare the version bump
 
 For a new target only, create `release/v<version>` from `origin/main`. Use the
-repository helper to update the source manifests and shipped runtime metadata:
+repository helper to update the source manifests:
 
 ```bash
 python3 .claude/skills/version-upgrade/scripts/bump_version.py <version>
@@ -64,12 +65,8 @@ python3 .claude/skills/version-upgrade/scripts/bump_version.py --check <version>
 
 The check must confirm one exact version in all of these locations:
 
-- `pyproject.toml`
-- `Cargo.toml`
-- the Rustwright creator version in `python/rustwright/sync_api.py`
-- the Rustwright trace version in `python/rustwright/sync_api.py`
-- the source-checkout fallback in `python/rustwright/cli.py`
-- the source-checkout fallback in `python/rustwright/_backend.py`
+- `Cargo.toml` (`rustwright-core`)
+- `rust-native/Cargo.toml` (`rustwright`)
 - the `rustwright-core` entry in `Cargo.lock`
 
 Run the release checks from `docs/RELEASING.md`:

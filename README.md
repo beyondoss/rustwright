@@ -19,17 +19,16 @@ It does **not** publish to PyPI, npm, or other language registries.
 Rustwright drives Chromium from a **native Rust CDP engine** — no Playwright Node driver subprocess in the path.
 
 ```text
-playwright-python:  your code ──pipe──► Node driver ──CDP──► Chromium
-rustwright:         your code / agent ── raw CDP ──────────► Chromium
+playwright MCP:  agent ──stdio──► Node MCP ──► Playwright driver ──CDP──► Chromium
+rustwright:      agent ──stdio──► rustwright-mcp ── raw CDP ─────────────► Chromium
 ```
 
 Primary entry points in this repository:
 
 | Surface | What it is |
 |---|---|
-| [`rustwright-cli`](cli/) | Agent-focused shell CLI with compact snapshots and `@eN` refs |
 | [`rustwright-mcp`](mcp/) | Native MCP stdio server (`browser_*` tools) |
-| [Language bindings (alpha)](bindings/CONTRACT.md) | Go, Java, C#/.NET, Ruby, PHP, and native Rust over a shared C ABI |
+| [`rustwright-cli`](cli/) | Agent-focused shell CLI with compact snapshots and `@eN` refs |
 
 ## Quickstart
 
@@ -91,16 +90,16 @@ Rustwright launches Chromium itself. Use a system Chrome/Chromium, or set
 
 ## Why Rustwright?
 
-- **No Node driver subprocess.** Playwright's Python binding launches and pipes to a bundled Node driver. Rustwright's engine is native.
+- **No Node driver subprocess.** Playwright MCP sits on Playwright's Node driver. Rustwright's engine is native Rust.
 - **Raw CDP, in Rust.** A from-scratch async CDP client — not a wrapper around another automation library.
 - **No Playwright automation fingerprint.** The driver never loads, so its signatures never appear. See [Automation detection](#automation-detection).
 - **Trusted input.** Clicks and typing use real CDP input events (`Input.dispatchMouseEvent`), not synthetic `element.click()` DOM calls.
 - **Cross-origin iframes (OOPIF).** Auto-attaches out-of-process iframe targets with flattened CDP sessions.
-- **One engine, many surfaces.** The same Rust core backs the CLI, MCP server, and alpha language bindings.
+- **One engine, agent surfaces.** The same Rust core backs the MCP server and CLI.
 
 ## How it works
 
-One Rust core — an async CDP client built on Tokio (WebSocket, with opt-in Unix-pipe transport) — talks to Chromium directly. Thin bindings and agent frontends sit on that core; nothing in the serving path requires Node or a package-registry install.
+One Rust core — an async CDP client built on Tokio (WebSocket, with opt-in Unix-pipe transport) — talks to Chromium directly. The MCP server and CLI sit on that core; nothing in the serving path requires Node or a package-registry install.
 
 ## Browser automation for AI agents
 
@@ -113,10 +112,10 @@ and follow it.
 ## Remote Chromium
 
 To drive an already-running Chromium over CDP, use
-`chromium.connect_over_cdp()` from a language binding (or point compatible
-tooling at the endpoint). See the [remote-browser guide](docs/REMOTE_BROWSERS.md)
-for endpoint shape, diagnostics, and security notes.
-`BrowserType.connect()` is not a CDP alias.
+`chromium().connect_over_cdp(...)` from the Rust library API (or point
+compatible tooling at the endpoint). See the
+[remote-browser guide](docs/REMOTE_BROWSERS.md) for endpoint shape, diagnostics,
+and security notes.
 
 ## Automation detection
 
@@ -157,32 +156,33 @@ Reproduce: `tools/compare_mcp_rss.py`. Notes: [`MEMORY_BENCH.md`](MEMORY_BENCH.m
 
 ## Alternatives
 
-| | Rustwright | playwright-python | Puppeteer | Patchright |
-|---|---|---|---|---|
-| **Surfaces** | Native CLI, MCP, C ABI bindings | Official Python Playwright | JS/TS Puppeteer | Playwright drop-in fork |
-| **Engine / transport** | Rust core, raw CDP | Python → Node driver | Node over CDP | Patched PW driver |
-| **In-process engine (no driver subprocess)** | ✅ | ❌ bundled Node driver | ✅ Node is the runtime | ❌ Playwright-style driver |
-| **Browsers** | Chromium only | Chromium, Firefox, WebKit | Chrome, Firefox | Chromium-based |
-| **Default input** | Trusted CDP events | Browser-level | Browser / CDP | Playwright + stealth |
-| **Cross-origin iframes** | OOPIF (alpha) | Mature | Frame APIs | Inherits Playwright |
-| **Playwright fingerprint** | No | Yes | n/a | Patched |
-| **Maturity** | 🟠 Alpha | 🟢 Mature | 🟢 Mature | 🟡 Focused fork |
+| | Rustwright | @playwright/mcp | Puppeteer |
+|---|---|---|---|
+| **Surfaces** | Native MCP + CLI | Node MCP on Playwright | JS/TS library |
+| **Engine / transport** | Rust core, raw CDP | Playwright Node driver | Node over CDP |
+| **In-process engine (no driver subprocess)** | ✅ | ❌ bundled Node driver | ✅ Node is the runtime |
+| **Browsers** | Chromium only | Chromium, Firefox, WebKit | Chrome, Firefox |
+| **Default input** | Trusted CDP events | Playwright defaults | Browser / CDP |
+| **Playwright fingerprint** | No | Yes | n/a |
+| **Maturity** | 🟠 Alpha | 🟢 Mature | 🟢 Mature |
 
-Rustwright's lane: **a Rust CDP engine for Chromium**, exposed through agent CLI/MCP and alpha language bindings.
+Rustwright's lane: **a Rust CDP engine for Chromium**, exposed through MCP and CLI for agents.
 
 ## Limitations
 
 See [`LIMITATIONS.md`](LIMITATIONS.md) for detail.
 
-- **Alpha** — API shape covered; full **behavioral** parity not yet proven.
-- **Chromium only** — Firefox and WebKit error explicitly.
-- **OOPIF** — residual gaps in non-main-frame `JSHandle` follow-ups and drag/screenshot/bounding-box.
+- **Alpha** — MCP/CLI surfaces work; expect rough edges.
+- **Chromium only** — Firefox and WebKit are out of scope.
+- **OOPIF** — residual gaps in non-main-frame follow-ups and drag/screenshot/bounding-box.
 - **Automation detection is partial** — 3 of 4 public fingerprint targets clean in local runs (CreepJS still detects headless). **No undetectability promise.**
-- **No registry packages here** — distribution is GitHub Release binaries / source builds, not PyPI or npm.
+- **No registry packages** — distribution is GitHub Release binaries / source builds.
 
 ## Contributing
 
-Rustwright is a Rust workspace: `cargo` builds the engine, CLI, MCP server, and C ABI. Language-binding smoke and engine tests run in CI (`test.yml`, `bindings.yml`). See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/RELEASING.md`](docs/RELEASING.md) for local checks and GitHub Release packaging.
+Rustwright is a Rust workspace: `cargo` builds the engine, CLI, and MCP server.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/RELEASING.md`](docs/RELEASING.md)
+for local checks and GitHub Release packaging.
 
 ## Project status
 
