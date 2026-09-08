@@ -3441,6 +3441,7 @@ mod tests {
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -5283,6 +5284,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -5443,6 +5445,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -5556,6 +5559,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -5956,6 +5960,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -6029,12 +6034,18 @@ multiline-compatible = """4.5.6"""
         let (events, _) = broadcast::channel(4);
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
+        let retention_gate = event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retention_gate
+            .clone();
         let client = CdpClient {
             write_tx,
             pending,
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events,
             event_log,
+            retention_gate,
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -6129,6 +6140,11 @@ multiline-compatible = """4.5.6"""
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(4);
         let (alive_tx, _) = watch::channel(true);
+        let (event_log, retention_gate) = {
+            let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+            let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+            (event_log, retention_gate)
+        };
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime::new(runtime),
             client: Arc::new(CdpClient {
@@ -6136,7 +6152,8 @@ multiline-compatible = """4.5.6"""
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
-                event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+                event_log: Arc::clone(&event_log),
+                retention_gate,
                 traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                 runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                 next_id: AtomicU64::new(1),
@@ -6807,6 +6824,54 @@ multiline-compatible = """4.5.6"""
         assert!(!body.contains("__POSITION_X__"));
         assert!(!body.contains("__POSITION_Y__"));
         assert!(ACTIONABILITY_PROBE_BODY.contains("__STRICT__"));
+    }
+
+    #[test]
+    fn retained_cdp_event_size_avoids_full_reserialize_and_tracks_growth() {
+        let small = json!({"method": "Page.loadEventFired", "params": {}});
+        let large = json!({
+            "method": "Network.responseReceived",
+            "params": {
+                "requestId": "r1",
+                "payload": "x".repeat(10_000),
+            }
+        });
+        let small_size = retained_cdp_event_size(&small);
+        let large_size = retained_cdp_event_size(&large);
+        assert!(small_size > 0);
+        assert!(large_size > small_size);
+        assert!(large_size >= 10_000);
+    }
+
+    #[test]
+    fn native_action_body_and_locator_script_are_stable_for_cache_reuse() {
+        let body = native_action_body(LOCATOR_TARGET_STATE_TEMPLATE);
+        let locator_json = "{\"kind\":\"css\",\"selector\":\"#ready\"}";
+        let first = locator_script(locator_json, 0, &body);
+        let second = locator_script(locator_json, 0, &body);
+        assert_eq!(first, second);
+        assert!(first.len() > 100);
+        // Rebuilding the script for every poll is the cost we cache away on the
+        // native actionable paths; keep the assembly itself deterministic.
+        let start = Instant::now();
+        for _ in 0..200 {
+            let _ = locator_script(locator_json, 0, &body);
+        }
+        let rebuild_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        let start = Instant::now();
+        let cached = locator_script(locator_json, 0, &body);
+        for _ in 0..200 {
+            let _ = cached.len();
+        }
+        let cached_ms = start.elapsed().as_secs_f64() * 1_000.0;
+        assert!(
+            rebuild_ms > cached_ms,
+            "expected script rebuild ({rebuild_ms:.3}ms) to exceed cached reuse ({cached_ms:.3}ms)"
+        );
+        eprintln!(
+            "locator_script_cache_microbench rebuild_ms={rebuild_ms:.3} cached_ms={cached_ms:.3} script_bytes={}",
+            cached.len()
+        );
     }
 
     #[test]
@@ -8115,6 +8180,7 @@ multiline-compatible = """4.5.6"""
             0,
             Some(40.0),
             true,
+            None,
         ));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -9139,6 +9205,11 @@ multiline-compatible = """4.5.6"""
             let (write_tx, write_rx) = mpsc::unbounded_channel();
             let (events, _) = broadcast::channel(4);
             let (alive_tx, _) = watch::channel(true);
+            let (event_log, retention_gate) = {
+                let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+                let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+                (event_log, retention_gate)
+            };
             let inner = Arc::new(BrowserInner {
                 runtime: OwnedRuntime::new(runtime),
                 client: Arc::new(CdpClient {
@@ -9146,7 +9217,8 @@ multiline-compatible = """4.5.6"""
                     pending: Arc::new(Mutex::new(HashMap::new())),
                     outstanding: Arc::new(Mutex::new(HashMap::new())),
                     events,
-                    event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+                    event_log: Arc::clone(&event_log),
+                    retention_gate,
                     traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                     runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                     next_id: AtomicU64::new(1),
@@ -9208,6 +9280,11 @@ multiline-compatible = """4.5.6"""
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(4);
         let (alive_tx, _) = watch::channel(true);
+        let (event_log, retention_gate) = {
+            let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+            let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+            (event_log, retention_gate)
+        };
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime::new(runtime),
             client: Arc::new(CdpClient {
@@ -9215,7 +9292,8 @@ multiline-compatible = """4.5.6"""
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
-                event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+                event_log: Arc::clone(&event_log),
+                retention_gate,
                 traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                 runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                 next_id: AtomicU64::new(1),
@@ -9304,6 +9382,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -9374,13 +9453,19 @@ multiline-compatible = """4.5.6"""
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(4);
         let (alive_tx, _) = watch::channel(true);
+        let (event_log, retention_gate) = {
+            let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+            let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+            (event_log, retention_gate)
+        };
         (
             CdpClient {
                 write_tx,
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
-                event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+                event_log: Arc::clone(&event_log),
+                retention_gate,
                 traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                 runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                 next_id: AtomicU64::new(1),
@@ -9524,6 +9609,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -9610,6 +9696,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -9680,12 +9767,18 @@ multiline-compatible = """4.5.6"""
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(4);
         let (alive_tx, _) = watch::channel(true);
+        let (event_log, retention_gate) = {
+            let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+            let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+            (event_log, retention_gate)
+        };
         let client = Arc::new(CdpClient {
             write_tx,
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events,
-            event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+            event_log: Arc::clone(&event_log),
+            retention_gate,
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -9854,6 +9947,11 @@ multiline-compatible = """4.5.6"""
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(4);
         let (alive_tx, _) = watch::channel(true);
+        let (event_log, retention_gate) = {
+            let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
+            let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
+            (event_log, retention_gate)
+        };
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime(None),
             client: Arc::new(CdpClient {
@@ -9861,7 +9959,8 @@ multiline-compatible = """4.5.6"""
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
-                event_log: Arc::new(Mutex::new(CdpEventLog::new())),
+                event_log: Arc::clone(&event_log),
+                retention_gate,
                 traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                 runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                 next_id: AtomicU64::new(1),
@@ -11375,6 +11474,7 @@ multiline-compatible = """4.5.6"""
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -25646,6 +25746,7 @@ struct CdpClient {
     outstanding: CdpOutstandingMap,
     events: broadcast::Sender<Value>,
     event_log: Arc<Mutex<CdpEventLog>>,
+    retention_gate: Arc<CdpRetentionGate>,
     traffic_log: Arc<Mutex<CdpTrafficLog>>,
     runtime_state: Arc<Mutex<CdpRuntimeState>>,
     next_id: AtomicU64,
@@ -25881,24 +25982,29 @@ fn strip_retained_heavy_payloads(event: &mut Value) {
     }
 }
 
-struct CountingWriter {
-    bytes: usize,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self.bytes.saturating_add(bytes.len());
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn retained_cdp_event_size(event: &Value) -> usize {
-    let mut writer = CountingWriter { bytes: 0 };
-    serde_json::to_writer(&mut writer, event).map_or(usize::MAX, |_| writer.bytes)
+    // Approximate JSON byte cost without re-serializing the Value on the event hot path.
+    // Retention caps are soft budgets; exact serde formatting is unnecessary here.
+    estimate_retained_json_size(event)
+}
+
+fn estimate_retained_json_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => text.len().saturating_add(2),
+        Value::Array(items) => items
+            .iter()
+            .map(estimate_retained_json_size)
+            .fold(2usize, |acc, size| acc.saturating_add(size).saturating_add(1)),
+        Value::Object(entries) => entries.iter().fold(2usize, |acc, (key, child)| {
+            acc.saturating_add(key.len())
+                .saturating_add(3)
+                .saturating_add(estimate_retained_json_size(child))
+        }),
+    }
 }
 
 fn retained_object_fields(value: &Value, fields: &[&str]) -> Value {
@@ -26806,7 +26912,11 @@ impl CdpClient {
         let (events, _) = broadcast::channel(4096);
         let events_reader = events.clone();
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
-        let event_log_writer = Arc::clone(&event_log);
+        let retention_gate = event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retention_gate
+            .clone();
         let event_log_reader = Arc::clone(&event_log);
         let traffic_log = Arc::new(Mutex::new(CdpTrafficLog::new()));
         let traffic_log_writer = Arc::clone(&traffic_log);
@@ -26826,6 +26936,7 @@ impl CdpClient {
         let (alive_tx, _) = watch::channel(true);
         let alive_tx_writer = alive_tx.clone();
         let alive_tx_reader = alive_tx.clone();
+        let retention_gate_writer = Arc::clone(&retention_gate);
 
         tokio::spawn(async move {
             while let Some(message) = write_rx.recv().await {
@@ -26835,32 +26946,43 @@ impl CdpClient {
                         tracker,
                         diagnostic_id,
                     } => {
-                        let diagnostic = diagnostic_id
-                            .and_then(|id| outstanding_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned());
+                        // Clone only the write-state Arc under the outstanding lock; build
+                        // traffic diagnostics without cloning the full outstanding command.
+                        let write_state = diagnostic_id.and_then(|id| {
+                            outstanding_writer
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .get(&id)
+                                .map(|command| Arc::clone(&command.write_state))
+                        });
                         // The sender abandons a command whose deadline expired; skipping it here is
                         // what makes "not written" a promise rather than a guess.
                         if let Some(tracker) = &tracker {
                             if !tracker.begin_write() {
                                 continue;
                             }
-                        } else if let Some(diagnostic) = &diagnostic {
-                            let _ = diagnostic.write_state.begin_write();
+                        } else if let Some(write_state) = &write_state {
+                            let _ = write_state.begin_write();
                         }
                         let written = write.send(Message::Text(payload.into())).await.is_ok();
                         if let Some(tracker) = tracker {
                             tracker.finish(written);
-                        } else if let Some(diagnostic) = &diagnostic {
-                            diagnostic.write_state.finish(written);
+                        } else if let Some(write_state) = &write_state {
+                            write_state.finish(written);
                         }
                         if written {
-                            if let Some(diagnostic) = diagnostic {
-                                let retention_gate =
-                                    event_log_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
-                                if let Some(_retention_guard) = retention_gate.lock_for_write() {
-                                    traffic_log_writer
+                            if let Some(id) = diagnostic_id {
+                                if let Some(_retention_guard) = retention_gate_writer.lock_for_write()
+                                {
+                                    let outstanding = outstanding_writer
                                         .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .push(diagnostic.traffic_entry("sent"));
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    if let Some(command) = outstanding.get(&id) {
+                                        traffic_log_writer
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                            .push(command.traffic_entry("sent"));
+                                    }
                                 };
                             }
                         }
@@ -26917,6 +27039,7 @@ impl CdpClient {
             outstanding,
             events,
             event_log,
+            retention_gate,
             traffic_log,
             runtime_state,
             next_id: AtomicU64::new(1),
@@ -26944,8 +27067,13 @@ impl CdpClient {
         let (events, _) = broadcast::channel(4096);
         let events_dispatcher = events.clone();
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
-        let event_log_writer = Arc::clone(&event_log);
+        let retention_gate = event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retention_gate
+            .clone();
         let event_log_dispatcher = Arc::clone(&event_log);
+        let retention_gate_writer = Arc::clone(&retention_gate);
         let traffic_log = Arc::new(Mutex::new(CdpTrafficLog::new()));
         let traffic_log_writer = Arc::clone(&traffic_log);
         let traffic_log_dispatcher = Arc::clone(&traffic_log);
@@ -26970,33 +27098,41 @@ impl CdpClient {
                         tracker,
                         diagnostic_id,
                     } => {
-                        let diagnostic = diagnostic_id
-                            .and_then(|id| outstanding_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned());
+                        let write_state = diagnostic_id.and_then(|id| {
+                            outstanding_writer
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .get(&id)
+                                .map(|command| Arc::clone(&command.write_state))
+                        });
                         // The sender abandons a command whose deadline expired; skipping it here is
                         // what makes "not written" a promise rather than a guess.
                         if let Some(tracker) = &tracker {
                             if !tracker.begin_write() {
                                 continue;
                             }
-                        } else if let Some(diagnostic) = &diagnostic {
-                            let _ = diagnostic.write_state.begin_write();
+                        } else if let Some(write_state) = &write_state {
+                            let _ = write_state.begin_write();
                         }
                         let written = pipe_write.write_all(payload.as_bytes()).is_ok()
                             && pipe_write.write_all(&[0]).is_ok();
                         if let Some(tracker) = tracker {
                             tracker.finish(written);
-                        } else if let Some(diagnostic) = &diagnostic {
-                            diagnostic.write_state.finish(written);
+                        } else if let Some(write_state) = &write_state {
+                            write_state.finish(written);
                         }
                         if written {
-                            if let Some(diagnostic) = diagnostic {
-                                let retention_gate =
-                                    event_log_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
-                                if let Some(_retention_guard) = retention_gate.lock_for_write() {
-                                    traffic_log_writer
+                            if let Some(id) = diagnostic_id {
+                                if let Some(_retention_guard) = retention_gate_writer.lock_for_write() {
+                                    let outstanding = outstanding_writer
                                         .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .push(diagnostic.traffic_entry("sent"));
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    if let Some(command) = outstanding.get(&id) {
+                                        traffic_log_writer
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                            .push(command.traffic_entry("sent"));
+                                    }
                                 };
                             }
                         }
@@ -27066,6 +27202,7 @@ impl CdpClient {
             outstanding,
             events,
             event_log,
+            retention_gate,
             traffic_log,
             runtime_state,
             next_id: AtomicU64::new(1),
@@ -27145,7 +27282,7 @@ impl CdpClient {
     }
 
     fn retention_gate(&self) -> Arc<CdpRetentionGate> {
-        self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone()
+        Arc::clone(&self.retention_gate)
     }
 
     fn retention_enabled(&self) -> bool {
@@ -38569,6 +38706,7 @@ async fn page_click_actionable_wait_async(
     index: usize,
     timeout_ms: Option<f64>,
     strict: bool,
+    on_poll: Option<ActionPollHook>,
 ) -> RwResult<(f64, f64, f64)> {
     let timeout_ms = Some(sanitize_action_timeout_ms(timeout_ms, true));
     let deadline = action_deadline(action_timeout_duration(timeout_ms, true));
@@ -38578,6 +38716,8 @@ async fn page_click_actionable_wait_async(
     let mut pinned_resolution = None;
     let mut cached_expression = None;
     let actionable_info = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        run_action_poll_hook(&on_poll, remaining).await?;
         ensure_native_action_owner_available(&page, "click")?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let command_timeout = action_poll_timeout(timeout_ms, true, remaining);
@@ -38656,6 +38796,42 @@ async fn page_click_actionable_wait_async(
         .as_secs_f64()
         * 1_000.0;
     Ok((target_x, target_y, remaining_ms))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn page_click_actionable_async(
+    page: Arc<PageInner>,
+    locator_json: String,
+    index: usize,
+    timeout_ms: Option<f64>,
+    strict: bool,
+    start_x: f64,
+    start_y: f64,
+    initial_buttons: i64,
+    modifiers: i64,
+    on_poll: Option<ActionPollHook>,
+) -> RwResult<(f64, f64)> {
+    let (target_x, target_y, remaining_ms) = page_click_actionable_wait_async(
+        Arc::clone(&page),
+        locator_json,
+        index,
+        timeout_ms,
+        strict,
+        on_poll,
+    )
+    .await?;
+    dispatch_mouse_click_async(
+        page,
+        target_x,
+        target_y,
+        start_x,
+        start_y,
+        initial_buttons,
+        modifiers,
+        remaining_ms,
+    )
+    .await?;
+    Ok((target_x, target_y))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39431,6 +39607,7 @@ impl PyPage {
                 index,
                 timeout_ms,
                 strict,
+                None,
             ),
             |py, value| Ok(value.into_pyobject(py)?.unbind().into_any()),
         )
@@ -41594,6 +41771,58 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                     strict,
                     forced,
                     action.to_string(),
+                    on_poll,
+                ),
+            ))
+        })
+        .map_err(py_err)
+    }
+
+    #[pyo3(signature = (
+        locator_json,
+        index,
+        strict,
+        timeout_ms=None,
+        start_x=0.0,
+        start_y=0.0,
+        initial_buttons=0,
+        modifiers=0,
+        on_poll=None,
+        cancel=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn locator_click_actionable(
+        &self,
+        py: Python<'_>,
+        locator_json: &str,
+        index: usize,
+        strict: bool,
+        timeout_ms: Option<f64>,
+        start_x: f64,
+        start_y: f64,
+        initial_buttons: i64,
+        modifiers: i64,
+        on_poll: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyRustCancelToken>>,
+    ) -> PyResult<(f64, f64)> {
+        let page = Arc::clone(&self.inner);
+        let browser = Arc::clone(&page.browser);
+        let locator_json = locator_json.to_string();
+        let on_poll = on_poll.map(python_action_poll_hook);
+        let cancel = cancel.map(|cancel| cancel.token.clone());
+        py.detach(move || {
+            browser.block_on(cancelable(
+                cancel,
+                page_click_actionable_async(
+                    page,
+                    locator_json,
+                    index,
+                    timeout_ms,
+                    strict,
+                    start_x,
+                    start_y,
+                    initial_buttons,
+                    modifiers,
                     on_poll,
                 ),
             ))
@@ -44671,6 +44900,7 @@ impl RustwrightNavigationHarness {
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
             event_log: Arc::clone(&event_log),
+            retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
             traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
             runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
             next_id: AtomicU64::new(1),
@@ -51468,6 +51698,7 @@ mod native_console_record_tests {
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events: events.clone(),
                 event_log: Arc::clone(&event_log),
+                retention_gate: event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone(),
                 traffic_log: Arc::new(Mutex::new(CdpTrafficLog::new())),
                 runtime_state: Arc::new(Mutex::new(CdpRuntimeState::new(None))),
                 next_id: AtomicU64::new(1),

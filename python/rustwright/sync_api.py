@@ -24470,6 +24470,42 @@ return __rw_fn(matches, __rw_arg);
             deadline = time.monotonic() + max(timeout_ms, 1.0) / 1000
             self._page._run_locator_handlers(deadline)
 
+        use_legacy_click = (
+            forced
+            or bool(trial)
+            or getattr(self._page, "_active_page_cdp_event_contexts", 0) > 0
+            or any(
+                value is not None
+                for value in (modifiers, position, delay, button, click_count, steps)
+            )
+        )
+        if not use_legacy_click:
+            timeout_ms = _default_timeout_for_method(self._page, timeout, method=method)
+            mouse = self._page.mouse
+            on_poll = (
+                self._page._run_locator_handlers_for_remaining
+                if getattr(self._page, "_locator_handlers", None)
+                else None
+            )
+            target_x, target_y = _call(
+                self._page._core.locator_click_actionable,
+                _json(self._spec),
+                self._index,
+                bool(self._strict and not self._explicit_index),
+                timeout_ms,
+                mouse._x,
+                mouse._y,
+                mouse._buttons,
+                self._page.keyboard._modifiers_mask(),
+                on_poll,
+            )
+            mouse._x = float(target_x)
+            mouse._y = float(target_y)
+            mouse._buttons &= ~1
+            run_post_action_locator_handlers()
+            self._page._slow_mo()
+            return
+
         target_info: Optional[dict[str, Any]] = None
         if forced:
             target_info = self._wait_for_forced_visible_pointer_action(

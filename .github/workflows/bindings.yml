@@ -145,8 +145,10 @@ jobs:
           print(f"{d['lang']}: {len(d['results'])} cases OK")
           PY
       # Upload can hit intermittent FinalizeArtifact 403s from the Actions
-      # intermediary; retry a few times before failing the job. The runner
-      # assertions above already validated the binding itself.
+      # intermediary; retry before failing the job. The runner assertions above
+      # already validated the binding itself. A failed Finalize can still reserve
+      # the artifact name, so overwrite:true often 409s — use a distinct retry name
+      # that the equivalence job still picks up via results-*.
       - name: Upload results
         if: steps.has.outputs.ok == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -160,10 +162,9 @@ jobs:
         if: steps.has.outputs.ok == 'true' && steps.upload-results.outcome != 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: results-${{ matrix.lang }}
+          name: results-${{ matrix.lang }}-retry-${{ github.run_attempt }}
           path: ${{ env.RW_OUT }}
           if-no-files-found: error
-          overwrite: true
 
   equivalence:
     name: Cross-language equivalence
