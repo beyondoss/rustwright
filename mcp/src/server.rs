@@ -217,7 +217,7 @@ fn production_tool_result(
                 budget,
             ))]);
             result.structured_content =
-                metadata.map(|metadata| serde_json::to_value(metadata).expect("metadata is JSON"));
+                metadata.and_then(|metadata| serde_json::to_value(metadata).ok());
             result
         }
     }

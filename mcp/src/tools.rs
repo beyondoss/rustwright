@@ -1276,8 +1276,8 @@ fn schema(kind: ToolKind) -> JsonObject {
     };
     value
         .as_object()
-        .expect("tool schema must be an object")
-        .clone()
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

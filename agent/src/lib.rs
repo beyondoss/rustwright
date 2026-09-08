@@ -1450,6 +1450,12 @@ impl ActivePageHandle {
     fn live_page(&self) -> Option<&Page> {
         self.page.as_ref()
     }
+
+    fn require_live(&self) -> Result<&Page, BrowserError> {
+        self.live_page().ok_or_else(|| {
+            BrowserError::Message("active page is not attached".to_owned())
+        })
+    }
 }
 
 impl std::ops::Deref for ActivePageHandle {
@@ -1998,6 +2004,31 @@ impl BrowserState {
         self.ensure_page_for(request, false)
     }
 
+    fn require_browser(&self) -> Result<&Browser, BrowserError> {
+        self.browser
+            .as_ref()
+            .ok_or_else(|| BrowserError::Message("browser is not initialized".to_owned()))
+    }
+
+    fn require_active_page(&self) -> Result<&ActivePageHandle, BrowserError> {
+        self.page
+            .as_ref()
+            .ok_or_else(|| BrowserError::Message("no active page is available".to_owned()))
+    }
+
+    fn ensure_live_page(&mut self, request: &ActorRequest) -> Result<&Page, BrowserError> {
+        self.ensure_page(request)?.require_live()
+    }
+
+    fn ensure_live_page_for(
+        &mut self,
+        request: &ActorRequest,
+        committed_observation: bool,
+    ) -> Result<&Page, BrowserError> {
+        self.ensure_page_for(request, committed_observation)?
+            .require_live()
+    }
+
     /// `committed_observation` marks a call that only observes state a committed
     /// action already produced.
     ///
@@ -2047,10 +2078,9 @@ impl BrowserState {
             self.page_lifecycle_seam = Some(seam);
             let mut discovered = discovered?;
             let candidate = if discovered.is_empty() {
-                let mut seam = self
-                    .page_lifecycle_seam
-                    .take()
-                    .expect("page lifecycle seam was restored");
+                let mut seam = self.page_lifecycle_seam.take().ok_or_else(|| {
+                    BrowserError::Message("page lifecycle seam was not restored".to_owned())
+                })?;
                 let candidate = seam.new_page(request);
                 self.page_lifecycle_seam = Some(seam);
                 candidate?
@@ -2066,10 +2096,10 @@ impl BrowserState {
                         request.timeout_ms,
                     )
                 })?;
-            return Ok(self.page.as_ref().expect("test page was installed"));
+            return self.require_active_page();
         }
         if self.page_lifecycle_seam.is_some() && self.page.is_some() {
-            return Ok(self.page.as_ref().expect("test page is already installed"));
+            return self.require_active_page();
         }
         if self.browser.is_none() {
             eprintln!("browser actor: launching Chromium lazily");
@@ -2097,9 +2127,7 @@ impl BrowserState {
         if self.page.is_none() {
             let remaining = Self::remaining(request)?;
             let existing = self
-                .browser
-                .as_ref()
-                .expect("browser was initialized")
+                .require_browser()?
                 .pages_with_cancel(
                     remaining.saturating_add(ENGINE_TIMEOUT_CUSHION),
                     Some(&request.cancellation.engine),
@@ -2118,9 +2146,7 @@ impl BrowserState {
                 Some(page) => Some(ActivePageHandle::live(page)),
                 None => {
                     let created = self
-                        .browser
-                        .as_ref()
-                        .expect("browser was initialized")
+                        .require_browser()?
                         .new_page_with_cancel(Some(&request.cancellation.engine));
                     Some(ActivePageHandle::live(created.map_err(|error| {
                         self.operation_error(
@@ -2134,10 +2160,7 @@ impl BrowserState {
             };
         }
         if let Some(page) = self.page.clone() {
-            if let Err(error) = self.register_page(
-                page.live_page()
-                    .expect("local active page should contain a live page"),
-            ) {
+            if let Err(error) = self.register_page(page.require_live()?) {
                 return Err(self.operation_error(
                     "console capture arm failed",
                     error,
@@ -2146,7 +2169,7 @@ impl BrowserState {
                 ));
             }
         }
-        Ok(self.page.as_ref().expect("page was initialized"))
+        self.require_active_page()
     }
 
     fn register_page(&mut self, page: &(impl PageRegistration + ?Sized)) -> Result<(), Error> {
@@ -2182,7 +2205,7 @@ impl BrowserState {
                     header_enabled,
                     || page.registration_events(),
                     || page.registration_details(),
-                    || url.expect("header-enabled registration captured a URL"),
+                    || url.clone().unwrap_or_default(),
                 ),
             );
         }
@@ -2670,7 +2693,7 @@ impl BrowserState {
         self.current_refs.clear();
         let remaining = Self::remaining(request)?;
         let started_at = Instant::now();
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let target_id = page.target_id();
         self.begin_observed_navigation(&target_id, Some(url.to_owned()));
         let result = page.goto_with_cancel_observed(
@@ -2687,7 +2710,7 @@ impl BrowserState {
                 if matches!(error, Error::Cancelled)
                     && request.cancellation.reason() == CancellationReason::Deadline
                 {
-                    if let Some(page) = self.page.as_ref() {
+                    if let Some(page) = self.page.as_ref().and_then(ActivePageHandle::live_page) {
                         page.emit_navigation_timeout_diagnostic(started_at.elapsed());
                     }
                 }
@@ -2707,7 +2730,7 @@ impl BrowserState {
         self.poll_events();
         self.current_refs.clear();
         let remaining = Self::remaining(request)?;
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let target_id = page.target_id();
         self.begin_observed_navigation(&target_id, None);
         let result = page.go_back_with_cancel_observed(
@@ -2740,7 +2763,7 @@ impl BrowserState {
         self.poll_events();
         self.current_refs.clear();
         let remaining = Self::remaining(request)?;
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let target_id = page.target_id();
         self.begin_observed_navigation(&target_id, None);
         let result = page.go_forward_with_cancel_observed(
@@ -2773,7 +2796,7 @@ impl BrowserState {
         self.poll_events();
         self.current_refs.clear();
         let remaining = Self::remaining(request)?;
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let target_id = page.target_id();
         self.begin_observed_navigation(&target_id, Some(page.url()));
         let result = page.reload_with_cancel_observed(
@@ -2799,7 +2822,7 @@ impl BrowserState {
     }
 
     fn resize(&mut self, width: u32, height: u32, request: &ActorRequest) -> TextResult {
-        let result = self.ensure_page(request)?.set_viewport_size(width, height);
+        let result = self.ensure_live_page(request)?.set_viewport_size(width, height);
         result.map_err(|error| {
             self.operation_error(
                 "viewport resize failed",
@@ -3004,9 +3027,7 @@ impl BrowserState {
             .as_ref()
             .map(|_| units.len().saturating_sub(1));
         let head = units.first().cloned();
-        self.response_shape
-            .get_or_insert_with(ResponseShape::default)
-            .snapshot = Some(SnapshotStructure {
+        let snapshot = SnapshotStructure {
             // Prefer `units` as the single materialized outline source; `legacy`
             // stays empty unless an older consumer filled it.
             legacy: String::new(),
@@ -3014,14 +3035,13 @@ impl BrowserState {
             units,
             renderer_incomplete,
             renderer_incomplete_index,
-        });
+        };
+        let outline = snapshot.outline();
+        self.response_shape
+            .get_or_insert_with(ResponseShape::default)
+            .snapshot = Some(snapshot);
         self.commit_snapshot_refs(&value, start_ref)?;
-        Ok(self
-            .response_shape
-            .as_ref()
-            .and_then(|shape| shape.snapshot.as_ref())
-            .map(SnapshotStructure::outline)
-            .expect("snapshot structure was just stored"))
+        Ok(outline)
     }
     fn limited_snapshot(&mut self, max_items: usize, request: &ActorRequest) -> TextResult {
         let outline = self.snapshot(request)?;
@@ -3083,7 +3103,7 @@ impl BrowserState {
         let helper_ready = self.snapshot_helper_target.as_deref() == Some(target_id.as_str());
         let value = if helper_ready {
             let result = self
-                .ensure_page_for(request, committed_observation)?
+                .ensure_live_page_for(request, committed_observation)?
                 .evaluate_with_cancel(
                     &snapshot_helper_invoke_expression(),
                     Some(&input),
@@ -3140,7 +3160,7 @@ impl BrowserState {
         committed_observation: bool,
     ) -> Result<Value, BrowserError> {
         let install_result = {
-            let page = self.ensure_page_for(request, committed_observation)?;
+            let page = self.ensure_live_page_for(request, committed_observation)?;
             page.evaluate_with_cancel(
                 &snapshot_helper_install_expression(script),
                 None,
@@ -3159,7 +3179,7 @@ impl BrowserState {
         })?;
         self.snapshot_helper_target = Some(target_id.to_owned());
         let invoke_result = {
-            let page = self.ensure_page_for(request, committed_observation)?;
+            let page = self.ensure_live_page_for(request, committed_observation)?;
             page.evaluate_with_cancel(
                 &snapshot_helper_invoke_expression(),
                 Some(input),
@@ -3211,7 +3231,7 @@ impl BrowserState {
         request: &ActorRequest,
     ) -> Result<bool, BrowserError> {
         let remaining = Self::remaining(request)?;
-        let result = self.ensure_page(request)?.evaluate_with_cancel(
+        let result = self.ensure_live_page(request)?.evaluate_with_cancel(
             BEGIN_SENSITIVE_SNAPSHOT_TRACKING_JS,
             Some(&json!({
                 "selector": selector,
@@ -3255,7 +3275,8 @@ impl BrowserState {
             BrowserError::Message(
                 "sensitive snapshot tracking resolution found no active page".to_owned(),
             )
-        })?;
+        })?
+        .require_live()?;
         let result = page.evaluate_with_cancel(
             RESOLVE_SENSITIVE_SNAPSHOT_TRACKING_JS,
             Some(&json!({ "value": sensitive_value })),
@@ -3289,7 +3310,7 @@ impl BrowserState {
     }
 
     fn discard_sensitive_snapshot_tracking(&mut self) {
-        let Some(page) = self.page.as_ref() else {
+        let Some(page) = self.page.as_ref().and_then(ActivePageHandle::live_page) else {
             return;
         };
         if let Err(error) = page.evaluate_with_cancel(
@@ -3329,7 +3350,7 @@ impl BrowserState {
                 .collect::<Vec<_>>()
         } else if let Some(regex) = regex {
             let remaining = Self::remaining(request)?;
-            let value = self.ensure_page(request)?.evaluate_with_cancel(
+            let value = self.ensure_live_page(request)?.evaluate_with_cancel(
                 FIND_REGEX_JS,
                 Some(&json!({
                     "lines": lines,
@@ -3532,7 +3553,7 @@ impl BrowserState {
         // A JavaScript dialog or intercepted file chooser can stall the
         // engine's post-dispatch action wait. Run the physical click on a
         // worker so the actor can surface its existing modal subscription.
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let selector = selector.to_owned();
         let cancellation = request.cancellation.engine.clone();
         let options = ActionOptions::timeout(Self::engine_timeout(remaining));
@@ -3584,7 +3605,7 @@ impl BrowserState {
         // and committed-write deadline semantics.
         let target = loop {
             let visible = self
-                .ensure_page(request)?
+                .ensure_live_page(request)?
                 .is_visible(selector)
                 .map_err(|error| {
                     self.operation_error(
@@ -3597,7 +3618,7 @@ impl BrowserState {
             if visible {
                 self.snapshot(request)?;
                 let target = self
-                    .ensure_page(request)?
+                    .ensure_live_page(request)?
                     .get_attribute(selector, "data-rustwright-ref")
                     .map_err(|error| {
                         self.operation_error(
@@ -3635,7 +3656,7 @@ impl BrowserState {
             end_target,
             |state| {
                 let remaining = Self::remaining(request)?;
-                let page = state.ensure_page(request)?.clone();
+                let page = state.ensure_page(request)?.require_live()?.clone();
                 let cancellation = request.cancellation.engine.clone();
                 let options = ActionOptions::timeout(Self::engine_timeout(remaining));
                 let (result_tx, result_rx) = sync_channel(1);
@@ -3696,7 +3717,7 @@ impl BrowserState {
             target,
             |state| {
                 let remaining = Self::remaining(request)?;
-                let result = state.ensure_page(request)?.scroll_into_view_with_cancel(
+                let result = state.ensure_live_page(request)?.scroll_into_view_with_cancel(
                     &selector,
                     ActionOptions::timeout(Self::engine_timeout(remaining)),
                     Some(&request.cancellation.engine),
@@ -3717,7 +3738,7 @@ impl BrowserState {
     fn scroll_viewport(&mut self, delta_y: f64, request: &ActorRequest) -> TextResult {
         self.current_refs.clear();
         let remaining = Self::remaining(request)?;
-        let result = self.ensure_page(request)?.scroll_viewport_with_cancel(
+        let result = self.ensure_live_page(request)?.scroll_viewport_with_cancel(
             delta_y,
             ActionOptions::timeout(Self::engine_timeout(remaining)),
             Some(&request.cancellation.engine),
@@ -3778,7 +3799,7 @@ impl BrowserState {
                     }
                     let remaining = Self::remaining(request)?;
                     let options = ActionOptions::timeout(Self::engine_timeout(remaining));
-                    let page = state.ensure_page(request)?.clone();
+                    let page = state.ensure_page(request)?.require_live()?.clone();
                     let result = if clear && !slowly {
                         page.fill_with_cancel(
                             &selector,
@@ -3824,7 +3845,7 @@ impl BrowserState {
                     if submit {
                         let submit_budget = Self::remaining(request)?;
                         state
-                            .ensure_page(request)?
+                            .ensure_live_page(request)?
                             .press_key_with_options_and_cancel(
                                 Some(&selector),
                                 "Enter",
@@ -3915,7 +3936,7 @@ impl BrowserState {
             |state| {
                 let remaining = Self::remaining(request)?;
                 state
-                    .ensure_page(request)?
+                    .ensure_live_page(request)?
                     .select_options_by_value_or_label_with_options_and_cancel(
                         &selector,
                         values,
@@ -4046,8 +4067,7 @@ impl BrowserState {
                             false,
                         ))
                     } else {
-                        page.as_ref()
-                            .expect("non-injected form fill has a page")
+                        require_form_fill_page(page.as_ref())?
                             .fill_with_cancel(
                                 &selector,
                                 &field.value,
@@ -4065,9 +4085,7 @@ impl BrowserState {
                             })
                     }
                     #[cfg(not(any(test, feature = "test-support")))]
-                    let native_result = page
-                        .as_ref()
-                        .expect("production form fill has a page")
+                    let native_result = require_form_fill_page(page.as_ref())?
                         .fill_with_cancel(
                             &selector,
                             &field.value,
@@ -4086,9 +4104,7 @@ impl BrowserState {
                     })
                 }
                 FillFieldKind::Checkbox => match field.value.as_str() {
-                    "true" => page
-                        .as_ref()
-                        .expect("checkbox form fill has a page")
+                    "true" => require_form_fill_page(page.as_ref())?
                         .check_with_cancel(&selector, options, Some(&request.cancellation.engine))
                         .map_err(|error| {
                             self.operation_error(
@@ -4098,9 +4114,7 @@ impl BrowserState {
                                 request.timeout_ms,
                             )
                         }),
-                    "false" => page
-                        .as_ref()
-                        .expect("checkbox form fill has a page")
+                    "false" => require_form_fill_page(page.as_ref())?
                         .uncheck_with_cancel(&selector, options, Some(&request.cancellation.engine))
                         .map_err(|error| {
                             self.operation_error(
@@ -4123,8 +4137,7 @@ impl BrowserState {
                         };
                         Err(BrowserError::Message(detail.to_owned()))
                     } else {
-                        page.as_ref()
-                            .expect("radio form fill has a page")
+                        require_form_fill_page(page.as_ref())?
                             .check_with_cancel(
                                 &selector,
                                 options,
@@ -4142,8 +4155,7 @@ impl BrowserState {
                 }
                 FillFieldKind::Combobox => {
                     let values = [field.value.clone()];
-                    page.as_ref()
-                        .expect("combobox form fill has a page")
+                    require_form_fill_page(page.as_ref())?
                         .select_options_by_value_or_label_with_options_and_cancel(
                             &selector,
                             &values,
@@ -4381,7 +4393,7 @@ impl BrowserState {
             |state| {
                 let remaining = Self::remaining(request)?;
                 state
-                    .ensure_page(request)?
+                    .ensure_live_page(request)?
                     .hover_with_options_and_cancel(
                         &selector,
                         ActionOptions::timeout(Self::engine_timeout(remaining)),
@@ -4411,7 +4423,7 @@ impl BrowserState {
     ) -> Result<(), BrowserError> {
         let remaining = Self::remaining(request)?;
         let result = self
-            .ensure_page(request)?
+            .ensure_live_page(request)?
             .press_key_with_options_and_cancel(
                 selector,
                 key,
@@ -4462,7 +4474,7 @@ impl BrowserState {
         let files = read_drop_files(self.config.workspace.as_deref(), paths)?;
         let selector = format!(r#"[data-rustwright-ref="{target}"]"#);
         let remaining = Self::remaining(request)?;
-        self.ensure_page(request)?
+        self.ensure_live_page(request)?
             .evaluate_with_cancel(
                 SYNTHETIC_DROP_JS,
                 Some(&json!({
@@ -4495,7 +4507,7 @@ impl BrowserState {
         let records = if let Some(source) = self.page_record_source.as_mut() {
             source.console_records(all, false)
         } else {
-            self.ensure_page(request)?.console_records(all, false)
+            self.ensure_live_page(request)?.console_records(all, false)
         }
         .map_err(|error| {
             self.operation_error(
@@ -4536,7 +4548,7 @@ impl BrowserState {
         let records = if let Some(source) = self.page_record_source.as_mut() {
             source.network_records(false, false)
         } else {
-            self.ensure_page(request)?.network_records(false, false)
+            self.ensure_live_page(request)?.network_records(false, false)
         };
         let filter = filter
             .map(NetworkRegex::compile)
@@ -4595,7 +4607,7 @@ impl BrowserState {
         const INLINE_BODY_BYTES: usize = 64 * 1024;
         const FILE_BODY_BYTES: usize = 20 * 1024 * 1024;
 
-        let page = self.ensure_page(request)?.clone();
+        let page = self.ensure_page(request)?.require_live()?.clone();
         let current = page.network_records(false, false);
         let Some(record) = current.records.iter().find(|record| record.index == index) else {
             let all = page.network_records(true, false);
@@ -4880,8 +4892,10 @@ impl BrowserState {
                 let remaining = Self::remaining(request).ok();
                 let title = remaining
                     .and_then(|remaining| {
-                        page.title(ActionOptions::timeout(Self::engine_timeout(remaining)))
-                            .ok()
+                        page.live_page().and_then(|live| {
+                            live.title(ActionOptions::timeout(Self::engine_timeout(remaining)))
+                                .ok()
+                        })
                     })
                     .or(cached)
                     .unwrap_or_else(|| "(unavailable)".to_owned());
@@ -4934,9 +4948,7 @@ impl BrowserState {
             TabAction::List => {}
             TabAction::New => {
                 let page = self
-                    .browser
-                    .as_ref()
-                    .expect("browser initialized")
+                    .require_browser()?
                     .new_page_with_cancel(Some(&request.cancellation.engine))
                     .map_err(|error| {
                         self.operation_error(
@@ -5029,7 +5041,10 @@ impl BrowserState {
                     self.page_lifecycle_seam = Some(seam);
                     closed?;
                 } else {
-                    closing.close(CloseOptions::default()).map_err(|error| {
+                    closing
+                        .require_live()?
+                        .close(CloseOptions::default())
+                        .map_err(|error| {
                         self.operation_error(
                             "tab close failed",
                             error,
@@ -5047,9 +5062,7 @@ impl BrowserState {
                         candidate?
                     } else {
                         let page = self
-                            .browser
-                            .as_ref()
-                            .expect("browser initialized")
+                            .require_browser()?
                             .new_page_with_cancel(Some(&request.cancellation.engine))
                             .map_err(|error| {
                                 self.operation_error(
@@ -5127,7 +5140,7 @@ impl BrowserState {
             .pages
             .get_mut(&pending_target)
             .and_then(|runtime| runtime.pending_dialog.take())
-            .expect("pending dialog disappeared");
+            .ok_or_else(|| BrowserError::Message("no dialog is pending".to_owned()))?;
         let result = if accept {
             pending.dialog.accept(prompt_text)
         } else {
@@ -5173,11 +5186,14 @@ impl BrowserState {
             .values()
             .any(|runtime| runtime.pending_dialog.is_some());
         let multiple = validate_file_upload_preconditions(multiple, dialog_pending)?;
+        let pending_target = pending_target.ok_or_else(|| {
+            BrowserError::Message("no file chooser is pending".to_owned())
+        })?;
         let pending = self
             .pages
-            .get_mut(pending_target.as_ref().expect("validated chooser target"))
+            .get_mut(&pending_target)
             .and_then(|runtime| runtime.pending_file_chooser.take())
-            .expect("pending file chooser disappeared");
+            .ok_or_else(|| BrowserError::Message("no file chooser is pending".to_owned()))?;
 
         let confined = validate_file_upload_multiplicity(multiple, paths.len())
             .and_then(|()| confine_workspace_files(self.config.workspace.as_deref(), paths));
@@ -5232,7 +5248,7 @@ impl BrowserState {
         request: &ActorRequest,
     ) -> TextResult {
         let remaining = Self::remaining(request)?;
-        self.ensure_page(request)?
+        self.ensure_live_page(request)?
             .evaluate_with_cancel(
                 WAIT_FOR_JS,
                 Some(&json!({
@@ -5261,7 +5277,7 @@ impl BrowserState {
         selector: &str,
         request: &ActorRequest,
     ) -> Result<Option<String>, BrowserError> {
-        self.ensure_page(request)?
+        self.ensure_live_page(request)?
             .inner_text(selector)
             .map_err(|error| {
                 self.operation_error(
@@ -5278,7 +5294,7 @@ impl BrowserState {
         request: &ActorRequest,
     ) -> Result<Option<String>, BrowserError> {
         let remaining = Self::remaining(request)?;
-        let result = self.ensure_page(request)?.text_content(
+        let result = self.ensure_live_page(request)?.text_content(
             selector,
             ActionOptions::timeout(Self::engine_timeout(remaining)),
         );
@@ -5345,14 +5361,14 @@ impl BrowserState {
                 )));
             }
             let selector = format!(r#"[data-rustwright-ref="{target}"]"#);
-            self.ensure_page(request)?.evaluate_with_cancel(
+            self.ensure_live_page(request)?.evaluate_with_cancel(
                 ELEMENT_EVALUATE_JS,
                 Some(&json!({"selector": selector, "function": function})),
                 ActionOptions::timeout(Self::engine_timeout(remaining)),
                 Some(&request.cancellation.engine),
             )
         } else {
-            self.ensure_page(request)?.evaluate_with_cancel(
+            self.ensure_live_page(request)?.evaluate_with_cancel(
                 function,
                 None,
                 ActionOptions::timeout(Self::engine_timeout(remaining)),
@@ -5377,7 +5393,7 @@ impl BrowserState {
     fn evaluate_wire(&mut self, expression: &str, request: &ActorRequest) -> TextResult {
         let remaining = Self::remaining(request)?;
         let wire = self
-            .ensure_page(request)?
+            .ensure_live_page(request)?
             .evaluate_wire_with_cancel(
                 expression,
                 None,
@@ -5400,7 +5416,7 @@ impl BrowserState {
     fn page_info(&mut self, request: &ActorRequest) -> TextResult {
         let remaining = Self::remaining(request)?;
         let (title, url) = {
-            let page = self.ensure_page(request)?;
+            let page = self.ensure_live_page(request)?;
             (
                 page.title(ActionOptions::timeout(Self::engine_timeout(remaining))),
                 page.url(),
@@ -5428,7 +5444,7 @@ impl BrowserState {
         request: &ActorRequest,
     ) -> Result<BrowserOutput, BrowserError> {
         let remaining = Self::remaining(request)?;
-        let result = self.ensure_page(request)?.screenshot_with_cancel(
+        let result = self.ensure_live_page(request)?.screenshot_with_cancel(
             ScreenshotOptions {
                 timeout: Some(Self::engine_timeout(remaining)),
                 full_page: Some(full_page),
@@ -5668,7 +5684,7 @@ impl BrowserState {
                 | BrowserOp::Status
         );
         if !preserve_retained_history {
-            if let Some(page) = self.page.as_ref() {
+            if let Some(page) = self.page.as_ref().and_then(ActivePageHandle::live_page) {
                 page.trim_retained_memory();
             }
         }
@@ -5849,6 +5865,11 @@ fn refs_in_snapshot_line(line: &str) -> Vec<String> {
         index += 1;
     }
     refs
+}
+
+fn require_form_fill_page(page: Option<&ActivePageHandle>) -> Result<&Page, BrowserError> {
+    page.ok_or_else(|| BrowserError::Message("form fill lost the active page".to_owned()))?
+        .require_live()
 }
 
 fn validate_file_upload_preconditions(
@@ -6265,8 +6286,7 @@ fn headers_json(headers: &[(String, String)]) -> String {
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect::<serde_json::Map<_, _>>();
-    serde_json::to_string_pretty(&Value::Object(headers))
-        .expect("string-only network headers must serialize")
+    serde_json::to_string_pretty(&Value::Object(headers)).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn bounded_network_detail_text(text: &str, max_bytes: usize, label: &str, inline: bool) -> String {
@@ -9075,6 +9095,36 @@ mod tests {
         );
         assert!(NetworkRegex::compile("api{2}").unwrap().is_match("/apii"));
         assert!(NetworkRegex::compile("[").is_err());
+    }
+
+    #[test]
+    fn missing_live_page_and_form_fill_page_return_errors() {
+        let detached = ActivePageHandle {
+            page: None,
+            target_id: "target".to_owned(),
+            url: "about:blank".to_owned(),
+        };
+        assert_eq!(
+            match detached.require_live() {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("detached handle must not report a live page"),
+            },
+            "active page is not attached"
+        );
+        assert_eq!(
+            match require_form_fill_page(None) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("missing form-fill page must error"),
+            },
+            "form fill lost the active page"
+        );
+        assert_eq!(
+            match require_form_fill_page(Some(&detached)) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("detached form-fill page must error"),
+            },
+            "active page is not attached"
+        );
     }
 
     #[test]
