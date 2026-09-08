@@ -1,13 +1,7 @@
 # Shared Rustwright files mirrored from rustwright to rustwright-cloud.
-# Repository-specific GitHub workflows and metadata are intentionally excluded,
-# with one deliberate exception: the form-fill cloud benchmark workflow is part
-# of the shared benchmark suite and is mirrored so hardening fixes stay in
-# lockstep. Note: syncing it requires RUSTWRIGHT_SYNC_GH_PAT to carry the
-# `workflow` scope; while the two copies are identical the entry is inert.
+# Repository-specific GitHub workflows and metadata are intentionally excluded.
 # Cloud-only additions must live outside the mirrored paths below.
 Skyvern-AI/rustwright-cloud:
-  - source: .github/workflows/form-fill-cloud-benchmark.yml
-    dest: .github/workflows/form-fill-cloud-benchmark.yml
   - source: benchmarks/
     dest: benchmarks/
     deleteOrphaned: true
@@ -22,42 +16,17 @@ Skyvern-AI/rustwright-cloud:
   - source: mcp/
     dest: mcp/
     deleteOrphaned: true
-  # capi/ and rust-native/ are Cargo workspace members referenced by the synced
-  # root Cargo.toml; they must mirror together or the target repo's workspace
-  # breaks (as happened when Cargo.toml gained these members before the dirs
-  # were mapped here).
-  - source: capi/
-    dest: capi/
-    deleteOrphaned: true
+  # rust-native/ and agent/ are Cargo workspace members referenced by the
+  # synced root Cargo.toml; they must mirror together or the target repo's
+  # workspace breaks.
   - source: rust-native/
     dest: rust-native/
     deleteOrphaned: true
-  # Cross-language binding packages and their shared contract; mapped so
-  # external contributions to any binding back-sync to the cloud repo. Every
-  # directory exists on this repo's main (a deleteOrphaned prerequisite).
-  - source: bindings/
-    dest: bindings/
-    deleteOrphaned: true
-  - source: go/
-    dest: go/
-    deleteOrphaned: true
-  - source: java/
-    dest: java/
-    deleteOrphaned: true
-  - source: csharp/
-    dest: csharp/
-    deleteOrphaned: true
-  - source: ruby/
-    dest: ruby/
-    deleteOrphaned: true
-  - source: php/
-    dest: php/
+  - source: agent/
+    dest: agent/
     deleteOrphaned: true
   - source: docs/
     dest: docs/
-    deleteOrphaned: true
-  - source: python/
-    dest: python/
     deleteOrphaned: true
   - source: src/
     dest: src/
@@ -94,11 +63,6 @@ Skyvern-AI/rustwright-cloud:
     dest: README.md
   - source: SECURITY.md
     dest: SECURITY.md
-  - source: pyproject.toml
-    dest: pyproject.toml
-  - source: examples/
-    dest: examples/
-    deleteOrphaned: true
   - source: QUICKSTART.md
     dest: QUICKSTART.md
   - source: MEMORY_BENCH.md

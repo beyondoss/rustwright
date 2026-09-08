@@ -1,4 +1,0 @@
-"""Compatibility for imports of Patchright's private generated-class module."""
-
-from rustwright.sync_api import *  # noqa: F401,F403
-from rustwright.sync_api import __all__ as __all__

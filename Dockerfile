@@ -1,146 +1,39 @@
 # syntax=docker/dockerfile:1.6
-ARG RUSTWRIGHT_DOCKER_BASE_IMAGE=python:3.13-slim-bookworm
+ARG RUSTWRIGHT_DOCKER_BASE_IMAGE=rust:1.88-bookworm
 FROM ${RUSTWRIGHT_DOCKER_BASE_IMAGE}
 
 USER root
 
-ARG PLAYWRIGHT_REFERENCE_VERSION=1.59.0
-ARG INSTALL_PUPPETEER=0
-
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
-    PATH=/usr/local/cargo/bin:/workspace/.local/bin:$PATH \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_BREAK_SYSTEM_PACKAGES=1 \
-    PIP_ROOT_USER_ACTION=ignore \
-    RUSTWRIGHT_CHROMIUM=/usr/local/bin/rustwright-chromium \
-    RUSTWRIGHT_BROWSERS_PATH=/ms-rustwright \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PLAYWRIGHT_REFERENCE_PATH=/opt/playwright-reference \
-    PUPPETEER_PACKAGE_PATH=/opt/puppeteer-benchmark/node_modules/puppeteer-core
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUSTWRIGHT_CHROMIUM=/usr/bin/chromium
 
 WORKDIR /workspace
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
         ca-certificates \
+        chromium \
         curl \
-        ffmpeg \
         git \
         pkg-config \
-        unzip \
-        xz-utils \
-    && if ! command -v python >/dev/null 2>&1 || ! python -m pip --version >/dev/null 2>&1; then \
-        apt-get install -y --no-install-recommends \
-          python3 \
-          python3-dev \
-          python3-pip \
-          python3-venv \
-          python-is-python3; \
-       fi \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal \
-    && chmod -R a+w "$CARGO_HOME" "$RUSTUP_HOME"
-
-COPY pyproject.toml Cargo.toml Cargo.lock ./
-RUN touch README.md
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip setuptools wheel "maturin>=1.5,<2" \
-    && python -m pip install "pytest>=8"
-
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY python ./python
-# The root Cargo.toml declares `capi`, `rust-native`, and `agent` as workspace
-# members, so cargo must be able to load each member manifest (and its lib
-# sources) to resolve the workspace before maturin builds the Python extension
-# — even though this image never builds those crates. Copy just the crate
-# manifests and sources, not build output.
-COPY capi/Cargo.toml ./capi/
-COPY capi/src ./capi/src
-COPY rust-native/Cargo.toml ./rust-native/
-COPY rust-native/src ./rust-native/src
-COPY agent/Cargo.toml ./agent/
-COPY agent/src ./agent/src
+COPY rust-native ./rust-native
+COPY agent ./agent
+COPY cli ./cli
+COPY mcp ./mcp
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    python -m pip install --no-build-isolation -e ".[dev]"
+    cargo build --release --locked \
+    && cargo build --manifest-path cli/Cargo.toml --release --locked \
+    && cargo build --manifest-path mcp/Cargo.toml --release --locked \
+    && cp cli/target/release/rustwright-cli /usr/local/bin/rustwright-cli \
+    && cp mcp/target/release/rustwright-mcp /usr/local/bin/rustwright-mcp
 
-COPY .github/chromium-version ./.github/chromium-version
-
-RUN --mount=type=cache,target=/var/cache/rustwright-browsers \
-    python -m rustwright.cli install-deps chromium \
-    && mkdir -p "$RUSTWRIGHT_BROWSERS_PATH" \
-    && case "$(uname -m)" in \
-        aarch64|arm64) echo "Using Playwright's Linux arm64 Chromium for Rustwright runtime in this image." ;; \
-        *) chromium_version="$(tr -d '[:space:]' < .github/chromium-version)" \
-           && RUSTWRIGHT_BROWSERS_PATH=/var/cache/rustwright-browsers \
-              python -m rustwright.cli install chromium --version "$chromium_version" \
-           && cp -a /var/cache/rustwright-browsers/. "$RUSTWRIGHT_BROWSERS_PATH"/ ;; \
-       esac
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/var/cache/playwright-browsers \
-    mkdir -p "$PLAYWRIGHT_REFERENCE_PATH" "$PLAYWRIGHT_BROWSERS_PATH" \
-    && python -m pip install --target "$PLAYWRIGHT_REFERENCE_PATH" "playwright==${PLAYWRIGHT_REFERENCE_VERSION}" \
-    && for attempt in 1 2 3; do \
-        PLAYWRIGHT_BROWSERS_PATH=/var/cache/playwright-browsers PYTHONPATH="$PLAYWRIGHT_REFERENCE_PATH" python -m playwright install chromium && break; \
-        if [ "$attempt" = "3" ]; then exit 1; fi; \
-        sleep "$((attempt * 5))"; \
-    done \
-    && cp -a /var/cache/playwright-browsers/. "$PLAYWRIGHT_BROWSERS_PATH"/
-
-RUN for root in "$RUSTWRIGHT_BROWSERS_PATH" "$PLAYWRIGHT_BROWSERS_PATH"; do \
-        if [ -d "$root" ]; then \
-          chmod -R a+rX "$root"; \
-          find "$root" -type f \( \
-            -name chrome -o \
-            -name chrome_crashpad_handler -o \
-            -name chromium_headless_shell -o \
-            -name headless_shell \
-          \) -exec chmod a+rx {} +; \
-        fi; \
-    done
-
-RUN case "$(uname -m)" in \
-        aarch64|arm64) browser="$(find "$PLAYWRIGHT_BROWSERS_PATH" -path '*/chrome-linux/chrome' -type f | head -n 1)" ;; \
-        *) chromium_version="$(tr -d '[:space:]' < .github/chromium-version)" \
-           && browser="$RUSTWRIGHT_BROWSERS_PATH/chromium-$chromium_version/chrome-linux64/chrome" ;; \
-    esac \
-    && test -n "$browser" \
-    && test -x "$browser" \
-    && ln -sf "$browser" "$RUSTWRIGHT_CHROMIUM" \
-    && echo "Chromium executable: $RUSTWRIGHT_CHROMIUM" \
-    && resolved_version="$("$RUSTWRIGHT_CHROMIUM" --version)" \
-    && echo "Chromium version: $resolved_version" \
-    && case "$(uname -m)" in \
-         aarch64|arm64) ;; \
-         *) case "$resolved_version" in \
-              *"$chromium_version"*) ;; \
-              *) echo "Pinned Chromium mismatch: expected $chromium_version, got $resolved_version" >&2; exit 1 ;; \
-            esac ;; \
-       esac
-
-RUN --mount=type=cache,target=/root/.npm \
-    if [ "$INSTALL_PUPPETEER" = "1" ]; then \
-        apt-get update \
-        && apt-get install -y --no-install-recommends nodejs npm \
-        && rm -rf /var/lib/apt/lists/* \
-        && mkdir -p /opt/puppeteer-benchmark \
-        && npm install --prefix /opt/puppeteer-benchmark --omit=dev puppeteer-core; \
-    fi
-
-COPY benchmarks ./benchmarks
-COPY tests ./tests
-COPY tools ./tools
-COPY docs ./docs
-COPY README.md ./README.md
-
-ENTRYPOINT ["/workspace/tools/docker_verify.sh"]
-CMD ["sampled"]
+CMD ["rustwright-mcp"]

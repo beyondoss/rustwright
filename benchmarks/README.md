@@ -1,19 +1,13 @@
 # Benchmarks
 
-See [BENCHMARK.md](../BENCHMARK.md) for the benchmark policy. In short:
-authoritative Rustwright benchmark evidence should use capped, sharded Docker
-runs instead of the developer machine's main Chrome or a long-lived host Chrome
-process.
+See [BENCHMARK.md](../BENCHMARK.md) and [MEMORY_BENCH.md](../MEMORY_BENCH.md).
 
-This directory contains two benchmark lanes:
+Rustwright's primary product surface is the native **MCP** / **CLI** stack.
+Automation-library speed lanes that required the retired Python binding have
+been removed. What remains here are browser-engine / page-load scaffolds and
+MCP memory measurement helpers under `tools/`.
 
-- `run_benchmarks.py` and `automation_cases.py`: Rustwright API/equivalent
-  automation speed and parity cases. This is the primary speed lane for
-  Rustwright-vs-Playwright claims.
-- Browser speed candidate folders: browser-engine, page-load, and external
-  benchmark scaffolds used as supporting evidence.
-
-## Browser Speed Candidates
+## Browser speed candidates
 
 List the available browser-speed scaffolds:
 
@@ -21,8 +15,8 @@ List the available browser-speed scaffolds:
 python benchmarks/browser_speed/list.py
 ```
 
-The browser-speed folders are intentionally lightweight. Setup commands place
-downloaded tools, cloned repos, and outputs under ignored `.benchmark-data/`.
+Setup commands place downloaded tools, cloned repos, and outputs under ignored
+`.benchmark-data/`.
 
 Useful starting points:
 
@@ -33,6 +27,6 @@ python benchmarks/tachometer/run.py --setup
 python benchmarks/browsertime/run.py --setup
 ```
 
-Use `bench-full` first for automation-library speed. Use these browser-speed
-candidates to check browser-engine/config, page-load, and external synthetic
-performance signals.
+## MCP memory
+
+Reproduce the MCP process RSS comparison with `tools/compare_mcp_rss.py`.

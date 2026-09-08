@@ -2,8 +2,8 @@
 
 This guide is for the release owner. This fork distributes prebuilt binaries as
 **GitHub Release assets** (for example `rustwright-cli-<target>` consumed by
-`install.sh`). It does not publish to PyPI, npm, NuGet, RubyGems, or Maven
-Central.
+`install.sh`, and `rustwright-mcp` when shipping the MCP server). It does not
+publish to language package registries.
 
 ## Agent-assisted version bump
 
@@ -16,23 +16,12 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
 
 - [ ] Choose one version in SemVer form, for example `0.2.0`.
 - [ ] Set that exact string in every source-of-truth field:
-  - `pyproject.toml` → `[project].version`
   - `Cargo.toml` → `[package].version` for `rustwright-core`
-  - `capi/Cargo.toml` → `[package].version` for `rustwright-capi`
   - `rust-native/Cargo.toml` → `[package].version` for `rustwright`
-  - `csharp/Rustwright/Rustwright.csproj` → `<Version>` (if kept in tree)
-  - `ruby/lib/rustwright.rb` → `VERSION` (if kept in tree)
-  - `java/build.gradle.kts` → top-level `version =` and `coordinates(...)` (if kept)
-- [ ] Set the same string in the shipped runtime metadata:
-  - `python/rustwright/sync_api.py` → Rustwright creator `version` in `_write_har`
-  - `python/rustwright/sync_api.py` → `playwrightVersion` in `_write_trace_zip`
-  - `python/rustwright/cli.py` → source-checkout fallback in `_version`
-  - `python/rustwright/_backend.py` → source-checkout fallback in `_version` (before `+local`)
-  - `python/rustwright/_agent/cli.py` → source-checkout fallback
 - [ ] Regenerate the lockfiles; do not edit generated entries by hand. There are
       three Cargo lockfiles, because `cli/` and `mcp/` are separate workspaces
-      that depend on `rustwright-core` by path — the root `cargo` command does
-      not touch them:
+      that depend on the core by path — the root `cargo` command does not touch
+      them:
 
   ```bash
   cargo metadata --format-version 1 > /dev/null

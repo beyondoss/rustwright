@@ -9147,11 +9147,7 @@ multiline-compatible = """4.5.6"""
     }
 
     #[test]
-    fn blocking_wrapper_falls_back_when_python_is_unavailable() {
-        assert!(
-            Python::try_attach(|_| ()).is_none(),
-            "cargo test should not initialize the Python interpreter"
-        );
+    fn blocking_wrapper_runs_without_python_attachment() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(1)
