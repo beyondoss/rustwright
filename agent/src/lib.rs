@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, Weak,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU64, AtomicU8, Ordering},
         mpsc::{TryRecvError, sync_channel},
     },
     thread,
@@ -5191,7 +5191,13 @@ impl BrowserState {
         let result = if confined.is_empty() {
             pending.chooser.cancel()
         } else {
-            pending.chooser.set_files(&confined)
+            match stage_confined_files(&confined) {
+                Ok(staged) => pending.chooser.set_files(staged.paths()),
+                Err(error) => {
+                    let _ = pending.chooser.cancel();
+                    return Err(file_upload_retry_error(error));
+                }
+            }
         };
         if let Err(error) = result {
             let error = self.operation_error(
@@ -6375,24 +6381,9 @@ fn read_drop_files(workspace: Option<&Path>, paths: &[String]) -> Result<Vec<Val
     let confined = confine_workspace_files(workspace, paths)?;
     let mut files = Vec::with_capacity(paths.len());
     for (requested, resolved) in paths.iter().zip(confined) {
-        // Open once and read from the file handle so metadata and bytes agree
-        // after the canonicalize/confine check (no second path-based open).
-        let mut file = fs::File::open(&resolved).map_err(|error| {
-            BrowserError::Message(format!("file input read failed: {requested}: {error}"))
-        })?;
-        let metadata = file.metadata().map_err(|error| {
-            BrowserError::Message(format!("file input metadata failed: {requested}: {error}"))
-        })?;
-        if !metadata.is_file() {
-            return Err(BrowserError::Message(format!(
-                "file input is not a regular file: {requested}"
-            )));
-        }
-        if metadata.len() > MAX_FILE_INPUT_BYTES {
-            return Err(BrowserError::Message(format!(
-                "file input exceeds the {MAX_FILE_INPUT_BYTES}-byte per-file cap: {requested}"
-            )));
-        }
+        // Open once (O_NOFOLLOW on Unix) so metadata and bytes agree after
+        // canonicalize, and a swapped symlink cannot redirect the read.
+        let mut file = open_confined_regular_file(&resolved)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|error| {
             BrowserError::Message(format!("file input read failed: {requested}: {error}"))
@@ -6473,6 +6464,111 @@ fn confine_workspace_file(
         )));
     }
     Ok(resolved)
+}
+
+fn open_confined_regular_file(path: &Path) -> Result<fs::File, BrowserError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|error| {
+        BrowserError::Message(format!(
+            "file input is unavailable: {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        BrowserError::Message(format!(
+            "file input metadata failed: {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(BrowserError::Message(format!(
+            "file input is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_FILE_INPUT_BYTES {
+        return Err(BrowserError::Message(format!(
+            "file input exceeds the {MAX_FILE_INPUT_BYTES}-byte per-file cap: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+struct StagedUpload {
+    dir: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+impl StagedUpload {
+    fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+}
+
+impl Drop for StagedUpload {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn stage_confined_files(confined: &[PathBuf]) -> Result<StagedUpload, BrowserError> {
+    static NEXT_STAGING: AtomicU64 = AtomicU64::new(1);
+    let dir = std::env::temp_dir().join(format!(
+        "rustwright-upload-{}-{}",
+        std::process::id(),
+        NEXT_STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&dir).map_err(|error| {
+                BrowserError::Message(format!("file input staging directory failed: {error}"))
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir(&dir).map_err(|error| {
+                BrowserError::Message(format!("file input staging directory failed: {error}"))
+            })?;
+        }
+    }
+    let mut staged = StagedUpload {
+        dir: dir.clone(),
+        paths: Vec::with_capacity(confined.len()),
+    };
+    for (index, source) in confined.iter().enumerate() {
+        let mut input = open_confined_regular_file(source)?;
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("upload.bin");
+        let dest = dir.join(format!("{index:04}-{file_name}"));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&dest).map_err(|error| {
+            BrowserError::Message(format!("file input staging failed: {error}"))
+        })?;
+        std::io::copy(&mut input, &mut output).map_err(|error| {
+            BrowserError::Message(format!("file input staging failed: {error}"))
+        })?;
+        staged.paths.push(dest);
+    }
+    Ok(staged)
 }
 
 fn mime_for_path(path: &Path) -> &'static str {
@@ -9050,6 +9146,64 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove confinement fixture");
+    }
+
+    #[test]
+    fn staged_upload_copies_bytes_into_private_dir() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(1);
+        let root = env::temp_dir().join(format!(
+            "rustwright-mcp-stage-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create staging workspace");
+        fs::write(workspace.join("valid.txt"), b"staged-bytes").expect("write confined file");
+        let confined = confine_workspace_file(Some(&workspace), "valid.txt").unwrap();
+        let staged = stage_confined_files(&[confined]).expect("stage confined file");
+        assert_eq!(staged.paths().len(), 1);
+        assert_eq!(
+            fs::read(&staged.paths()[0]).expect("read staged file"),
+            b"staged-bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = fs::metadata(staged.dir.as_path())
+                .expect("stage dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+        }
+        let staged_path = staged.paths()[0].clone();
+        drop(staged);
+        assert!(!staged_path.exists());
+        fs::remove_dir_all(root).expect("remove staging fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_open_rejects_symlink_swapped_after_canonicalize() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(1);
+        let root = env::temp_dir().join(format!(
+            "rustwright-mcp-nofollow-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create nofollow workspace");
+        fs::write(workspace.join("valid.txt"), b"original").expect("write confined file");
+        let confined = confine_workspace_file(Some(&workspace), "valid.txt").unwrap();
+        fs::remove_file(&confined).expect("remove confined file");
+        std::os::unix::fs::symlink("/etc/passwd", &confined).expect("plant symlink");
+        assert!(
+            open_confined_regular_file(&confined)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        fs::remove_dir_all(root).expect("remove nofollow fixture");
     }
 
     fn process_rows() -> Vec<(u32, u32)> {
