@@ -6518,6 +6518,25 @@ impl Drop for StagedUpload {
     }
 }
 
+fn create_staging_directory(path: &Path) -> Result<(), BrowserError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path).map_err(|error| {
+            BrowserError::Message(format!("file input staging directory failed: {error}"))
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path).map_err(|error| {
+            BrowserError::Message(format!("file input staging directory failed: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn stage_confined_files(confined: &[PathBuf]) -> Result<StagedUpload, BrowserError> {
     static NEXT_STAGING: AtomicU64 = AtomicU64::new(1);
     let dir = std::env::temp_dir().join(format!(
@@ -6525,23 +6544,7 @@ fn stage_confined_files(confined: &[PathBuf]) -> Result<StagedUpload, BrowserErr
         std::process::id(),
         NEXT_STAGING.fetch_add(1, Ordering::Relaxed)
     ));
-    {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            builder.create(&dir).map_err(|error| {
-                BrowserError::Message(format!("file input staging directory failed: {error}"))
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir(&dir).map_err(|error| {
-                BrowserError::Message(format!("file input staging directory failed: {error}"))
-            })?;
-        }
-    }
+    create_staging_directory(&dir)?;
     let mut staged = StagedUpload {
         dir: dir.clone(),
         paths: Vec::with_capacity(confined.len()),
@@ -6552,7 +6555,12 @@ fn stage_confined_files(confined: &[PathBuf]) -> Result<StagedUpload, BrowserErr
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("upload.bin");
-        let dest = dir.join(format!("{index:04}-{file_name}"));
+        // Keep the original basename as the last path component so Chromium
+        // reports `files[i].name` unchanged. Unique numbered parents avoid
+        // collisions when two uploads share a name.
+        let dest_dir = dir.join(format!("{index:04}"));
+        create_staging_directory(&dest_dir)?;
+        let dest = dest_dir.join(file_name);
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -9162,6 +9170,10 @@ mod tests {
         let confined = confine_workspace_file(Some(&workspace), "valid.txt").unwrap();
         let staged = stage_confined_files(&[confined]).expect("stage confined file");
         assert_eq!(staged.paths().len(), 1);
+        assert_eq!(
+            staged.paths()[0].file_name().and_then(|name| name.to_str()),
+            Some("valid.txt")
+        );
         assert_eq!(
             fs::read(&staged.paths()[0]).expect("read staged file"),
             b"staged-bytes"
