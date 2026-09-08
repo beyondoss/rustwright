@@ -3016,11 +3016,6 @@ impl BrowserState {
             renderer_incomplete_index,
         });
         self.commit_snapshot_refs(&value, start_ref)?;
-        // Observation complete: drop prior-navigation / high-water retained
-        // history so long MCP sessions do not keep peak RSS as idle RSS.
-        if let Some(page) = self.page.as_ref() {
-            page.trim_retained_memory();
-        }
         Ok(self
             .response_shape
             .as_ref()
@@ -5656,6 +5651,21 @@ impl BrowserState {
                 }))
             }
         };
+        // Soft-trim after tools that are not reading retained history, so peak
+        // traffic during navigate/click/fill does not remain as idle RSS.
+        let preserve_retained_history = matches!(
+            request.op,
+            BrowserOp::ConsoleMessages { .. }
+                | BrowserOp::NetworkRequests { .. }
+                | BrowserOp::NetworkRequest { .. }
+                | BrowserOp::Close
+                | BrowserOp::Status
+        );
+        if !preserve_retained_history {
+            if let Some(page) = self.page.as_ref() {
+                page.trim_retained_memory();
+            }
+        }
         let output = result.map(|output| match (output, self.response_shape.take()) {
             (BrowserOutput::Text(text), Some(mut shape)) => {
                 if let Some(snapshot) = shape.snapshot.as_ref() {

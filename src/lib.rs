@@ -23056,6 +23056,52 @@ return this.dataset.mainWorldOverride === "observed";
                 .map(str::len),
             Some(CDP_RETAINED_STRING_MAX_BYTES)
         );
+        let cookie = format!("session={}", "c".repeat(CDP_RETAINED_STRING_MAX_BYTES));
+        let request_with_headers = request_from_event(
+            &json!({
+                "params": {
+                    "requestId": "req-headers",
+                    "loaderId": "loader-1",
+                    "frameId": "frame-1",
+                    "timestamp": 1.0,
+                    "wallTime": 1.0,
+                    "type": "Fetch",
+                    "documentURL": "https://example.test/",
+                    "request": {
+                        "url": "https://example.test/",
+                        "method": "GET",
+                        "headers": { "Cookie": cookie },
+                    }
+                }
+            }),
+            None,
+        )
+        .expect("request snapshot with headers");
+        assert_eq!(
+            request_with_headers
+                .pointer("/headers/Cookie")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        let native_headers = metadata_headers(Some(&json!({
+            "Cookie": format!("session={}", "n".repeat(CDP_RETAINED_STRING_MAX_BYTES * 2)),
+            "X-Small": "ok",
+        })));
+        assert_eq!(
+            native_headers
+                .iter()
+                .find(|(name, _)| name == "Cookie")
+                .map(|(_, value)| value.len()),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        assert_eq!(
+            native_headers
+                .iter()
+                .find(|(name, _)| name == "X-Small")
+                .map(|(_, value)| value.as_str()),
+            Some("ok")
+        );
         assert_eq!(
             console_arg_value(&json!({ "type": "string", "value": post })),
             Value::String("p".repeat(CDP_RETAINED_STRING_MAX_BYTES))
@@ -25731,6 +25777,28 @@ fn truncate_retained_string(text: &str) -> String {
         end -= 1;
     }
     text[..end].to_owned()
+}
+
+fn retained_headers(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Object(headers)) => {
+            let mut retained = serde_json::Map::with_capacity(headers.len());
+            for (name, header_value) in headers {
+                let text = match header_value {
+                    Value::String(text) => truncate_retained_string(text),
+                    other => truncate_retained_string(&other.to_string()),
+                };
+                retained.insert(name.clone(), Value::String(text));
+            }
+            Value::Object(retained)
+        }
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => json!({}),
+    }
 }
 
 fn retained_json_string(value: Option<&Value>) -> Value {
@@ -29608,13 +29676,11 @@ fn metadata_headers(value: Option<&Value>) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
-            (
-                name.clone(),
-                value
-                    .as_str()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| value.to_string()),
-            )
+            let text = value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            (name.clone(), truncate_retained_string(&text))
         })
         .collect()
 }
@@ -34768,19 +34834,61 @@ async fn evaluate_locator_for_page(
     body: &str,
     timeout: Duration,
 ) -> RwResult<String> {
+    let mut pinned_resolution = None;
+    let mut cached_expression = None;
+    evaluate_locator_for_page_cached(
+        page,
+        locator_json,
+        index,
+        body,
+        timeout,
+        &mut pinned_resolution,
+        &mut cached_expression,
+    )
+    .await
+}
+
+async fn evaluate_locator_for_page_cached(
+    page: Arc<PageInner>,
+    locator_json: &str,
+    index: usize,
+    body: &str,
+    timeout: Duration,
+    pinned_resolution: &mut Option<LocatorSessionResolution>,
+    cached_expression: &mut Option<String>,
+) -> RwResult<String> {
     let deadline = OperationDeadline::new(timeout);
     for attempt in 0..=1 {
-        let resolution =
-            resolve_locator_session(Arc::clone(&page), locator_json, deadline).await?;
-        let expression = locator_script(&resolution.locator_json, index, body);
-        match evaluate_locator_resolution(&page, &resolution, &expression, deadline, Duration::ZERO)
+        let resolution = match pinned_resolution.as_ref() {
+            Some(pinned) if locator_resolution_ownership_is_current(&page, pinned) => {
+                pinned.clone()
+            }
+            _ => {
+                pinned_resolution.take();
+                cached_expression.take();
+                let resolution =
+                    resolve_locator_session(Arc::clone(&page), locator_json, deadline).await?;
+                *pinned_resolution = Some(resolution.clone());
+                resolution
+            }
+        };
+        if cached_expression.is_none() {
+            *cached_expression = Some(locator_script(&resolution.locator_json, index, body));
+        }
+        let expression = cached_expression
+            .as_deref()
+            .expect("locator expression was just cached");
+        match evaluate_locator_resolution(&page, &resolution, expression, deadline, Duration::ZERO)
             .await
         {
             Err(error)
                 if attempt == 0
                     && (is_frame_ownership_changed(&error)
-                        || is_locator_wait_context_loss(&error)) =>
+                        || is_locator_wait_context_loss(&error)
+                        || is_transient_action_resolution_error(&error)) =>
             {
+                pinned_resolution.take();
+                cached_expression.take();
                 continue;
             }
             result => return result,
@@ -35665,11 +35773,11 @@ impl Drop for FillGuardDropCleanup {
 
 async fn evaluate_locator_fill_for_page(
     page: Arc<PageInner>,
-    locator_json: String,
+    locator_json: &str,
     index: usize,
-    body: String,
-    guard_key: String,
-    value: String,
+    body: &str,
+    guard_key: &str,
+    value: &str,
     timeout: Duration,
     pinned_resolution: &mut Option<LocatorSessionResolution>,
     current_attempt_evidence: &mut FillAttemptEvidence,
@@ -35684,7 +35792,7 @@ async fn evaluate_locator_fill_for_page(
     let mut resolution = if let Some(pinned) = pinned_resolution.as_ref() {
         pinned.clone()
     } else {
-        resolve_locator_fill_session(Arc::clone(&page), &locator_json, deadline).await?
+        resolve_locator_fill_session(Arc::clone(&page), locator_json, deadline).await?
     };
     *pinned_resolution = Some(resolution.clone());
     let outcome = async {
@@ -35695,7 +35803,7 @@ async fn evaluate_locator_fill_for_page(
             let observation = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                &fill_guard_reentry_observation_expression(&guard_key)?,
+                &fill_guard_reentry_observation_expression(guard_key)?,
                 deadline,
                 Duration::ZERO,
             )
@@ -35715,7 +35823,7 @@ async fn evaluate_locator_fill_for_page(
                         *current_attempt_evidence = FillAttemptEvidence::Resolve;
                         resolution = resolve_locator_fill_session(
                             Arc::clone(&page),
-                            &locator_json,
+                            locator_json,
                             deadline,
                         )
                         .await?;
@@ -35726,7 +35834,7 @@ async fn evaluate_locator_fill_for_page(
                     pinned_resolution.take();
                     *current_attempt_evidence = FillAttemptEvidence::Resolve;
                     resolution =
-                        resolve_locator_fill_session(Arc::clone(&page), &locator_json, deadline)
+                        resolve_locator_fill_session(Arc::clone(&page), locator_json, deadline)
                             .await?;
                     *pinned_resolution = Some(resolution.clone());
                 }
@@ -38461,16 +38569,20 @@ async fn page_click_actionable_wait_async(
     let body = native_action_body(LOCATOR_TARGET_STATE_TEMPLATE);
     let mut last_info = json!({ "count": 0 });
     let mut last_info_json = last_info.to_string();
+    let mut pinned_resolution = None;
+    let mut cached_expression = None;
     let actionable_info = loop {
         ensure_native_action_owner_available(&page, "click")?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let command_timeout = action_poll_timeout(timeout_ms, true, remaining);
-        let evaluation = evaluate_locator_for_page(
+        let evaluation = evaluate_locator_for_page_cached(
             Arc::clone(&page),
             &locator_json,
             index,
             &body,
             command_timeout,
+            &mut pinned_resolution,
+            &mut cached_expression,
         )
         .await;
         let json = match evaluation {
@@ -38691,11 +38803,11 @@ async fn page_fill_actionable_with_script_async(
         // Sync #106 parity: a safe probe timeout is transient until the outer action deadline.
         let evaluation = evaluate_locator_fill_for_page(
             Arc::clone(&page),
-            locator_json.clone(),
+            &locator_json,
             index,
-            fill_script.body.clone(),
-            fill_script.guard_key.clone(),
-            value.clone(),
+            &fill_script.body,
+            &fill_script.guard_key,
+            &value,
             command_timeout,
             &mut pinned_resolution,
             &mut current_attempt_evidence,
@@ -41323,11 +41435,11 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                 let mut current_attempt_evidence = FillAttemptEvidence::Resolve;
                 evaluate_locator_fill_for_page(
                     page,
-                    locator_json,
+                    &locator_json,
                     index,
-                    fill_script.body,
-                    fill_script.guard_key,
-                    value,
+                    &fill_script.body,
+                    &fill_script.guard_key,
+                    &value,
                     timeout,
                     &mut pinned_resolution,
                     &mut current_attempt_evidence,
@@ -56866,7 +56978,7 @@ fn route_from_event(event: &Value) -> Option<Value> {
         "resource_type": params.get("resourceType").cloned().unwrap_or(Value::Null),
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
-        "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
+        "headers": retained_headers(request.get("headers")),
         "post_data": retained_json_string(request.get("postData")),
         "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
     }))
@@ -56891,7 +57003,7 @@ fn request_from_event(event: &Value, redirected_from: Option<Value>) -> Option<V
         "is_navigation_request": params.get("documentURL") == request.get("url"),
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
-        "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
+        "headers": retained_headers(request.get("headers")),
         "post_data": retained_json_string(request.get("postData")),
         "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
         "redirect_hop": redirect_hop,
