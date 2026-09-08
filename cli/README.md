@@ -9,7 +9,7 @@ The quickest path is the install script, which grabs a prebuilt binary (and fall
 from source when a prebuilt binary is not published for your platform):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Skyvern-AI/rustwright/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/beyondoss/rustwright/main/install.sh | sh
 ```
 
 To build from source explicitly (requires Rust 1.88 or newer):
@@ -18,8 +18,8 @@ To build from source explicitly (requires Rust 1.88 or newer):
 cargo install --path cli
 ```
 
-Install Chromium with `python -m rustwright install chromium`, use a system Chrome/Chromium, or set
-`RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM` to an executable path.
+Use a system Chrome/Chromium, or set `RUSTWRIGHT_CHROMIUM`, `CHROME`, or
+`CHROMIUM` to an executable path.
 
 ## CLI
 
