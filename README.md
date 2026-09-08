@@ -180,23 +180,6 @@ See [`LIMITATIONS.md`](LIMITATIONS.md) for detail.
 - **Automation detection is partial** — 3 of 4 public fingerprint targets clean in local runs (CreepJS still detects headless). **No undetectability promise.**
 - **No registry packages here** — distribution is GitHub Release binaries / source builds, not PyPI or npm.
 
-## Roadmap
-
-- [ ] **Kotlin binding** — idiomatic Kotlin wrapper (Kotlin/JVM can already consume the Java FFM binding)
-- [ ] Grow the language bindings beyond the alpha subset (contexts, routing, locators)
-- [x] **Rustwright MCP server** — expose browser automation as tools for MCP-compatible AI agents ([mcp/](mcp/))
-- [ ] CI / Testbox-backed benchmark evidence
-- [ ] Close remaining OOPIF gaps
-
-Recently shipped:
-
-- [x] **Language bindings (alpha)** — Go, Java, C#/.NET, Ruby, and PHP over a shared C ABI, plus a native Rust API ([`bindings/CONTRACT.md`](bindings/CONTRACT.md)); cross-language equivalence gated in CI
-- [x] Native async engine over the Tokio CDP core
-- [x] OOPIF auto-attach with flattened CDP sessions
-- [x] `Runtime.enable` console-serialization leak closed on the default path
-
-Firefox and WebKit are **not planned** — Rustwright is deliberately Chromium-only.
-
 ## Contributing
 
 Rustwright is a Rust workspace: `cargo` builds the engine, CLI, MCP server, and C ABI. Language-binding smoke and engine tests run in CI (`test.yml`, `bindings.yml`). See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/RELEASING.md`](docs/RELEASING.md) for local checks and GitHub Release packaging.
@@ -205,18 +188,6 @@ Rustwright is a Rust workspace: `cargo` builds the engine, CLI, MCP server, and 
 
 Rustwright is an early alpha, developed in the open. If the architecture
 resonates, [give it a ⭐](https://github.com/beyondoss/rustwright).
-
-## Telemetry
-
-Rustwright sends one `engine_launched` event per process to PostHog with the Rustwright version, operating system, and CPU architecture. It sends no URLs or page content.
-
-Events carry a random installation ID, generated without using the hostname, username, or MAC address, stored at `~/.cache/rustwright/telemetry_id` (or the `$XDG_CACHE_HOME`/`%LOCALAPPDATA%` equivalent) so events from the same installation can be counted together. Delete the file to reset it. Events are marked personless, and GeoIP enrichment is disabled at the event level. The request, like any HTTPS request, exposes the sender's IP address to PostHog, but Rustwright does not store the IP address in the event payload.
-
-To opt out:
-
-```bash
-export DISABLE_TELEMETRY=1   # or DO_NOT_TRACK=1
-```
 
 ## License
 
