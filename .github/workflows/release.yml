@@ -1,0 +1,215 @@
+name: Release binaries
+
+# Build rustwright-cli / rustwright-mcp for the targets install.sh understands
+# and attach them to the GitHub Release.
+#
+# Linux assets are static musl binaries (via Zig). Native-host MCP builds use
+# tools/build_mcp_pgo.sh; cross MCP builds stay on the plain release profile.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach binaries to (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  build:
+    name: ${{ matrix.crate }} (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # install.sh maps uname → these four triples for rustwright-cli-*.
+          - crate: cli
+            target: aarch64-apple-darwin
+            runner: macos-15
+            zig: false
+            pgo: false
+          - crate: cli
+            target: x86_64-apple-darwin
+            runner: macos-15
+            zig: false
+            pgo: false
+          - crate: cli
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            zig: true
+            zig_target: x86_64-unknown-linux-musl
+            pgo: false
+          - crate: cli
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            zig: true
+            zig_target: aarch64-unknown-linux-musl
+            pgo: false
+          - crate: mcp
+            target: aarch64-apple-darwin
+            runner: macos-15
+            zig: false
+            pgo: true
+          - crate: mcp
+            target: x86_64-apple-darwin
+            runner: macos-15
+            zig: false
+            pgo: false
+          - crate: mcp
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            zig: true
+            zig_target: x86_64-unknown-linux-musl
+            pgo: true
+          - crate: mcp
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            zig: true
+            zig_target: aarch64-unknown-linux-musl
+            pgo: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.event.release.tag_name }}"
+          fi
+          case "$tag" in
+            v*) ;;
+            *)
+              echo "::error::expected a v* release tag, got ${tag}"
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: llvm-tools-preview
+
+      - name: Set up Zig
+        if: ${{ matrix.zig && !matrix.pgo }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        if: ${{ matrix.zig && !matrix.pgo }}
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-zigbuild@0.23.0
+
+      - name: Install musl-tools (MCP PGO)
+        if: ${{ matrix.pgo && contains(matrix.target, 'linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # Plain musl CLI/MCP builds use cargo-zigbuild alone (no tools/zig-cc).
+      # Musl MCP PGO uses musl-gcc: Zig cannot link __llvm_profile_runtime.
+
+      - name: Build ${{ matrix.crate }} (${{ matrix.target }})
+        shell: bash
+        env:
+          RUSTWRIGHT_PGO_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          manifest="${{ matrix.crate }}/Cargo.toml"
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            test "${{ matrix.crate }}" = "mcp"
+            tools/build_mcp_pgo.sh
+          elif [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --release --locked --manifest-path "$manifest" \
+              --target "${{ matrix.zig_target }}"
+          else
+            cargo build --release --locked --manifest-path "$manifest" \
+              --target "${{ matrix.target }}"
+          fi
+
+      - name: Stage release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="rustwright-${{ matrix.crate }}"
+          asset="${bin}-${{ matrix.target }}"
+          src="${{ matrix.crate }}/target/${{ matrix.target }}/release/${bin}"
+          if [ ! -f "$src" ]; then
+            # Host-target builds sometimes land under target/release/.
+            alt="${{ matrix.crate }}/target/release/${bin}"
+            if [ -f "$alt" ]; then
+              src="$alt"
+            else
+              echo "::error::built binary not found at ${src} or ${alt}"
+              ls -la "${{ matrix.crate }}/target/${{ matrix.target }}/release" || true
+              exit 1
+            fi
+          fi
+          mkdir -p dist
+          cp "$src" "dist/${asset}"
+          chmod +x "dist/${asset}"
+
+          case "${{ matrix.target }}" in
+            *-linux-musl)
+              if ldd "dist/${asset}" 2>/dev/null | grep -qE '\.so'; then
+                echo "::error::expected a static musl binary, but ldd resolved shared libs:"
+                ldd "dist/${asset}" || true
+                exit 1
+              fi
+              if ! file "dist/${asset}" | grep -qiE 'static'; then
+                echo "::error::expected file(1) to report a static binary:"
+                file "dist/${asset}" || true
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "path=dist/${asset}" >> "$GITHUB_OUTPUT"
+          echo "name=${asset}" >> "$GITHUB_OUTPUT"
+          ls -lh "dist/${asset}"
+          file "dist/${asset}" || true
+
+      - name: Upload ${{ steps.asset.outputs.name }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          ASSET: ${{ steps.asset.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" "$ASSET" --clobber

@@ -23,7 +23,8 @@ detect_target() {
     os="$(uname -s)"
     arch="$(uname -m)"
     case "$os" in
-        Linux) os_part="unknown-linux-gnu" ;;
+        # Release Linux assets are static musl binaries (see release.yml).
+        Linux) os_part="unknown-linux-musl" ;;
         Darwin) os_part="apple-darwin" ;;
         *) return 1 ;;
     esac

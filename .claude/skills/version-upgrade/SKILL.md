@@ -95,8 +95,25 @@ Skip this section in prepare-only mode.
 1. Wait for required PR checks. Merge using the repository's normal merge
    policy; do not bypass required reviews or protections.
 2. Refresh `origin/main`, verify that commit contains the exact target version,
-   then tag `v<version>` and push the tag.
-3. Build and attach GitHub Release assets (`rustwright-cli-*`, and
-   `rustwright-mcp` when shipping the MCP server). Prefer
-   `tools/build_mcp_pgo.sh` for native-host MCP binaries.
-4. Confirm `install.sh` can download the new CLI asset on a clean machine.
+   and verify the worktree is clean.
+3. Create an annotated `v<version>` tag on that commit using the GitHub noreply
+   identity. Push only that tag. Never retag a branch commit, unmerged commit,
+   stale commit, or untested commit.
+4. Create (or publish) the GitHub Release for `v<version>`. That triggers
+   `.github/workflows/release.yml`, which builds and uploads the
+   `rustwright-cli-<target>` / `rustwright-mcp-<target>` assets documented in
+   `docs/RELEASING.md` (static Linux musl; PGO for native-runnable MCP). Wait
+   for that workflow to finish; do not hand-build unless CI is broken. To
+   backfill an existing empty Release, dispatch the workflow with the tag.
+
+## 5. Verify and report
+
+Confirm the GitHub Release exists for `v<version>` and that `install.sh` (or an
+equivalent download path) retrieves the CLI asset.
+
+Return a compact release summary containing:
+
+- version and tag;
+- release PR;
+- GitHub Release URL / assets;
+- verification status or the single concrete blocker.

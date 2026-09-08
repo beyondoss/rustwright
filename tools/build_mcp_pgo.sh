@@ -4,8 +4,15 @@
 #
 # Environment:
 #   RUSTWRIGHT_PGO_TOOLCHAIN  rustup toolchain (default: stable)
-#   RUSTWRIGHT_PGO_TARGET     rustc target triple (default: host)
+#   RUSTWRIGHT_PGO_TARGET     rustc target triple (default: host). Same-arch
+#                             Linux musl on a GNU host is allowed for static
+#                             release assets; other cross targets are rejected.
 #   PGO_PROFILE_DIR           profile scratch dir
+#
+# Linux musl PGO uses the host musl-gcc (x86_64-linux-musl-gcc /
+# aarch64-linux-musl-gcc). Do not use cargo-zigbuild for instrumented musl
+# links — Zig rejects __llvm_profile_runtime. Plain (non-PGO) musl release
+# builds still use cargo-zigbuild in CI.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,8 +25,20 @@ host_triple="$(rustc "+${toolchain}" -vV | sed -n 's/^host: //p')"
 if [[ -z "$target" ]]; then
   target="$host_triple"
 fi
-if [[ "$target" != "$host_triple" ]]; then
-  echo "PGO build requires a native target (host=${host_triple}, target=${target})" >&2
+
+# PGO needs a runnable binary on this host. Exact host triples are fine; so is
+# same-arch Linux musl on a GNU host (static musl binaries run there).
+pgo_target_ok=0
+if [[ "$target" == "$host_triple" ]]; then
+  pgo_target_ok=1
+else
+  case "${host_triple}/${target}" in
+    x86_64-unknown-linux-gnu/x86_64-unknown-linux-musl) pgo_target_ok=1 ;;
+    aarch64-unknown-linux-gnu/aarch64-unknown-linux-musl) pgo_target_ok=1 ;;
+  esac
+fi
+if [[ "$pgo_target_ok" -ne 1 ]]; then
+  echo "PGO build requires a native-runnable target (host=${host_triple}, target=${target})" >&2
   exit 2
 fi
 
@@ -38,6 +57,27 @@ if [[ ! -x "$profdata_bin" && ! -f "$profdata_bin" ]]; then
   echo "install with: rustup component add llvm-tools-preview --toolchain ${toolchain}" >&2
   exit 127
 fi
+
+case "$target" in
+  x86_64-unknown-linux-musl)
+    musl_cc="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER:-x86_64-linux-musl-gcc}"
+    if ! command -v "$musl_cc" >/dev/null 2>&1; then
+      echo "musl PGO requires ${musl_cc} (install musl-tools)" >&2
+      exit 127
+    fi
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$musl_cc"
+    export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-$musl_cc}"
+    ;;
+  aarch64-unknown-linux-musl)
+    musl_cc="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-aarch64-linux-musl-gcc}"
+    if ! command -v "$musl_cc" >/dev/null 2>&1; then
+      echo "musl PGO requires ${musl_cc} (install musl-tools)" >&2
+      exit 127
+    fi
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$musl_cc"
+    export CC_aarch64_unknown_linux_musl="${CC_aarch64_unknown_linux_musl:-$musl_cc}"
+    ;;
+esac
 
 mkdir -p "$profdir"
 find "$profdir" -mindepth 1 -delete
