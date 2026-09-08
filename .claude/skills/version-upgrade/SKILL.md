@@ -7,7 +7,8 @@ description: Prepare and validate a Rustwright version bump for GitHub Release a
 
 Bump the shared Rustwright version fields and prepare a release PR. This fork
 distributes prebuilt binaries as GitHub Release assets. It does not publish to
-PyPI or npm. Do not publish `rustwright-core` to crates.io from this skill.
+language package registries. Do not publish `rustwright-core` to crates.io from
+this skill.
 
 ## Arguments and mode
 
@@ -46,7 +47,7 @@ Read `$ARGUMENTS` for an exact SemVer version and an optional mode.
 ## 2. Prepare the version bump
 
 For a new target only, create `release/v<version>` from `origin/main`. Use the
-repository helper to update the source manifests and shipped runtime metadata:
+repository helper to update the source manifests:
 
 ```bash
 python3 .claude/skills/version-upgrade/scripts/bump_version.py <version>
@@ -64,12 +65,8 @@ python3 .claude/skills/version-upgrade/scripts/bump_version.py --check <version>
 
 The check must confirm one exact version in all of these locations:
 
-- `pyproject.toml`
-- `Cargo.toml`
-- the Rustwright creator version in `python/rustwright/sync_api.py`
-- the Rustwright trace version in `python/rustwright/sync_api.py`
-- the source-checkout fallback in `python/rustwright/cli.py`
-- the source-checkout fallback in `python/rustwright/_backend.py`
+- `Cargo.toml` (`rustwright-core`)
+- `rust-native/Cargo.toml` (`rustwright`)
 - the `rustwright-core` entry in `Cargo.lock`
 
 Run the release checks from `docs/RELEASING.md`:
@@ -98,23 +95,8 @@ Skip this section in prepare-only mode.
 1. Wait for required PR checks. Merge using the repository's normal merge
    policy; do not bypass required reviews or protections.
 2. Refresh `origin/main`, verify that commit contains the exact target version,
-   and verify the worktree is clean.
-3. Create an annotated `v<version>` tag on that commit using the GitHub noreply
-   identity. Push only that tag. Never retag a branch commit, unmerged commit,
-   stale commit, or untested commit.
-4. Build and upload the GitHub Release assets documented in
-   `docs/RELEASING.md` (at least the `rustwright-cli-<target>` names expected by
-   `install.sh`). Attach `rustwright-mcp` binaries when shipping the MCP
-   server; for native-host MCP assets prefer `tools/build_mcp_pgo.sh`.
-
-## 5. Verify and report
-
-Confirm the GitHub Release exists for `v<version>` and that `install.sh` (or an
-equivalent download path) retrieves the CLI asset.
-
-Return a compact release summary containing:
-
-- version and tag;
-- release PR;
-- GitHub Release URL / assets;
-- verification status or the single concrete blocker.
+   then tag `v<version>` and push the tag.
+3. Build and attach GitHub Release assets (`rustwright-cli-*`, and
+   `rustwright-mcp` when shipping the MCP server). Prefer
+   `tools/build_mcp_pgo.sh` for native-host MCP binaries.
+4. Confirm `install.sh` can download the new CLI asset on a clean machine.

@@ -1,4 +1,0 @@
-*.gem
-/pkg/
-/lib/rustwright/native/
-/.bundle/
