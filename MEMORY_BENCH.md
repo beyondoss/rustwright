@@ -36,6 +36,16 @@ For release **binary** cost (size / strip / LTO), use the host-safe helper
 `tools/measure_release_binary_cost.sh` — no browser launch. Keep raw outputs
 under ignored `.benchmark-data/`.
 
+For MCP **process RSS vs Playwright MCP**, use `tools/compare_mcp_rss.py`
+(host-safe `initialize` + `tools/list`; no Chromium). On linux x86_64:
+
+| MCP server | Median process VmRSS |
+|---|---:|
+| `rustwright-mcp` | 5.0 MiB (5128 KiB) |
+| `@playwright/mcp` 0.0.80 | 135.2 MiB (138456 KiB) |
+
+≈ **27×** smaller / **−96%** for the MCP server process alone.
+
 For MCP **PGO** before/after (size + protocol microbench + process VmRSS), use
 `tools/measure_mcp_pgo.sh`, `tools/measure_mcp_pgo_rss.sh`, and
 `tools/build_mcp_pgo.sh` — trains with `tools/pgo_train_mcp.py` plus

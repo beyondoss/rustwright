@@ -13,7 +13,7 @@ This is the canonical Rustwright MCP server.
 From source (needs a Rust toolchain):
 
 ```bash
-cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp
+cargo install --git https://github.com/beyondoss/rustwright rustwright-mcp
 ```
 
 The server binary is installed as `rustwright-mcp`. Prefer attaching prebuilt
@@ -25,9 +25,8 @@ The server launches Chromium itself:
 
 - Already have Chrome/Chromium? Set `RUSTWRIGHT_CHROMIUM` (or `CHROME` /
   `CHROMIUM`) to the executable path.
-- Otherwise download a managed build once with
-  `maturin develop --release && python -m rustwright install chromium` — the
-  server finds it automatically.
+- Otherwise install Chrome/Chromium from your OS package manager or vendor
+  download, then set one of those env vars.
 
 ## Configure your client
 

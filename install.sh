@@ -1,14 +1,14 @@
 #!/bin/sh
 # Rustwright CLI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Skyvern-AI/rustwright/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/beyondoss/rustwright/main/install.sh | sh
 #
 # Downloads a prebuilt `rustwright-cli` binary for the current platform. When no
 # prebuilt binary is published for the platform (or the download fails), it
 # falls back to building from source with cargo.
 set -eu
 
-REPO="Skyvern-AI/rustwright"
+REPO="beyondoss/rustwright"
 BIN="rustwright-cli"
 INSTALL_DIR="${RUSTWRIGHT_INSTALL_DIR:-$HOME/.local/bin}"
 
