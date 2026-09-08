@@ -41,6 +41,16 @@ For MCP **PGO** before/after (size + protocol microbench + process VmRSS), use
 `tools/build_mcp_pgo.sh` — trains with `tools/pgo_train_mcp.py` plus
 `cargo test --bin rustwright-mcp` (no browser; MCP process RSS only).
 
+Measured on linux x86_64 against a fat-LTO baseline (host-safe; no Chromium):
+
+- Binary: 7.753 MiB → 6.462 MiB (−16.7%)
+- MCP process VmRSS median: 6340 KiB → 5416 KiB (−14.6%)
+- Protocol microbench median stayed within noise
+
+When attaching `rustwright-mcp` to a GitHub Release on a native host/target,
+prefer `tools/build_mcp_pgo.sh` over a plain `cargo build --release`. Cross
+builds without a matching native PGO train stay on the non-PGO release profile.
+
 For repeated runs, the raw peak remains in every `results` item and `aggregate`
 contains distribution summaries for both RSS fields. Benchmark output belongs
 under the ignored `.benchmark-data/` directory; do not commit raw result JSON,

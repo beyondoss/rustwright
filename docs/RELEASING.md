@@ -72,3 +72,9 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
 `rustwright-mcp` may be attached the same way when shipping the MCP server.
 `cli/` and `mcp/` version independently from the shared library version when
 needed.
+
+For native-host `rustwright-mcp` release assets, prefer
+`tools/build_mcp_pgo.sh` (fat LTO + profile-guided optimization; host-safe
+training, no browser). See `MEMORY_BENCH.md` for the measured size / process
+RSS deltas. Cross-compiled targets without a matching native train stay on a
+plain release build.
