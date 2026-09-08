@@ -590,7 +590,15 @@ pub(crate) fn parse_op(
     spec: ToolSpec,
     arguments: Option<Map<String, Value>>,
 ) -> Result<BrowserOp, String> {
-    let arguments = Value::Object(arguments.unwrap_or_default());
+    // Hosts sometimes forward internal metadata inside tool arguments
+    // (Cursor: `_model_supports_vision`). Those keys are not part of the
+    // published tool surface; strip underscore-prefixed roots so strict
+    // `deny_unknown_fields` decode still accepts the real parameters.
+    // Unknown non-underscore fields stay rejected — that feedback is for
+    // model mistakes (`uri` vs `url`), not host bookkeeping.
+    let mut arguments = arguments.unwrap_or_default();
+    arguments.retain(|key, _| !key.starts_with('_'));
+    let arguments = Value::Object(arguments);
     match spec.kind {
         ToolKind::Navigate => {
             let args: NavigateArgs = decode(arguments)?;
@@ -1644,6 +1652,75 @@ mod tests {
             .find(|spec| spec.name == "browser_wait_for")
             .unwrap();
         assert!(parse_op(wait, Some(Map::new())).is_err());
+    }
+
+    #[test]
+    fn host_internal_underscore_arguments_are_ignored() {
+        // Cursor (and similar hosts) inject bookkeeping such as
+        // `_model_supports_vision` into MCP tool arguments. The published
+        // schemas stay `additionalProperties: false` and decode stays
+        // `deny_unknown_fields`; only underscore-prefixed roots are dropped
+        // so a valid call is not rejected before the browser opens.
+        let navigate = TOOL_SPECS
+            .iter()
+            .copied()
+            .find(|spec| spec.name == "browser_navigate")
+            .unwrap();
+        assert!(
+            matches!(
+                parse_op(
+                    navigate,
+                    Some(
+                        json!({
+                            "url": "https://example.com",
+                            "_model_supports_vision": true
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                    )
+                ),
+                Ok(BrowserOp::Navigate(url)) if url == "https://example.com"
+            ),
+            "underscore-prefixed host metadata must not fail navigate"
+        );
+        assert!(
+            parse_op(
+                navigate,
+                Some(
+                    json!({
+                        "url": "https://example.com",
+                        "uri": "https://example.com"
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                )
+            )
+            .is_err(),
+            "non-underscore unknown fields must still be rejected"
+        );
+
+        let back = TOOL_SPECS
+            .iter()
+            .copied()
+            .find(|spec| spec.name == "browser_navigate_back")
+            .unwrap();
+        assert!(
+            matches!(
+                parse_op(
+                    back,
+                    Some(
+                        json!({"_model_supports_vision": false})
+                            .as_object()
+                            .unwrap()
+                            .clone()
+                    )
+                ),
+                Ok(BrowserOp::NavigateBack)
+            ),
+            "empty-arg tools must accept host-only underscore metadata"
+        );
     }
 
     #[test]
