@@ -106,7 +106,7 @@ Skip this section in prepare-only mode.
 4. Build and upload the GitHub Release assets documented in
    `docs/RELEASING.md` (at least the `rustwright-cli-<target>` names expected by
    `install.sh`). Attach `rustwright-mcp` binaries when shipping the MCP
-   server.
+   server; for native-host MCP assets prefer `tools/build_mcp_pgo.sh`.
 
 ## 5. Verify and report
 
