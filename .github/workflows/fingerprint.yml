@@ -7,10 +7,10 @@ name: Rustwright Fingerprint Evidence
 # (continue-on-error) because those sites flake and change without notice.
 #
 # Structured result summaries are uploaded as a dated artifact and rendered in
-# the job summary. Following AGENTS.md ("publish only reviewed, reproducible
-# summaries"), raw probe evidence (screenshots, page dumps, network captures)
-# is never written at all, and the workflow does NOT commit results back to
-# the repo — promoting a run into the README is a reviewed, human step.
+# the job summary. Publish only reviewed, reproducible summaries: raw probe
+# evidence (screenshots, page dumps, network captures) is never written at
+# all, and the workflow does NOT commit results back to the repo — promoting a
+# run into the README is a reviewed, human step.
 
 on:
   schedule:

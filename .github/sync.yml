@@ -99,8 +99,6 @@ Skyvern-AI/rustwright-cloud:
   - source: examples/
     dest: examples/
     deleteOrphaned: true
-  - source: AGENTS.md
-    dest: AGENTS.md
   - source: QUICKSTART.md
     dest: QUICKSTART.md
   - source: MEMORY_BENCH.md
