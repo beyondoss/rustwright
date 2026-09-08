@@ -14049,6 +14049,21 @@ def test_locator_fill_routes_deadline_retry_and_result_classification_through_co
     assert "time.monotonic" not in source
 
 
+def test_locator_click_routes_default_optionless_through_core():
+    from rustwright.sync_api import Locator
+
+    source = inspect.getsource(Locator._click_impl)
+
+    assert "locator_click_actionable" in source
+    assert "use_legacy_click" in source
+    # Default optionless path must not fall through to the Python actionable poll loop.
+    default_branch = source.split("if not use_legacy_click:", 1)[1].split("target_info:", 1)[0]
+    assert "locator_click_actionable" in default_branch
+    assert "_wait_for_single" not in default_branch
+    assert "_mouse_click_at_point" not in default_branch
+    assert "while True" not in default_branch
+
+
 def test_locator_fill_timeout_zero_disables_timeout(page):
     page.set_content("<input id='ready' value='old'>")
 
