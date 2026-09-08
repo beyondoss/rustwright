@@ -1,18 +1,7 @@
 **A Rust rewrite of Playwright's browser engine**, speaking raw
 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
-in-process — no Playwright Node driver, no Playwright automation fingerprint.
-Alpha; Chromium-only.
-
-Measured `rustwright-mcp` release cost on linux x86_64 (host-safe; no Chromium
-in the RSS sample) — see [`MEMORY_BENCH.md`](MEMORY_BENCH.md):
-
-| | Before | After | Delta |
-|---|---:|---:|---:|
-| Release binary (default → fat LTO + strip) | 16.776 MiB | 7.748 MiB | **−53.8%** |
-| Release binary (fat LTO → PGO) | 7.753 MiB | 6.462 MiB | **−16.7%** |
-| Process VmRSS median (fat LTO → PGO) | 6340 KiB | 5416 KiB | **−14.6%** |
-
-Default release → PGO is **16.776 MiB → 6.462 MiB (−61.5%)**.
+in-process — **[~4× smaller client memory than playwright-python](#benchmarks)**
+(no Node driver), with no Playwright automation fingerprint. Alpha; Chromium-only.
 
 This repository ships **native binaries** (CLI + MCP) as GitHub Release assets.
 It does **not** publish to PyPI, npm, or other language registries.
@@ -21,8 +10,6 @@ It does **not** publish to PyPI, npm, or other language registries.
 [![tests](https://img.shields.io/github/actions/workflow/status/beyondoss/rustwright/test.yml?label=tests)](https://github.com/beyondoss/rustwright/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Chromium only](https://img.shields.io/badge/browser-Chromium-4285F4?logo=googlechrome&logoColor=white)](#limitations)
-
-</div>
 
 ---
 
@@ -109,7 +96,6 @@ Rustwright launches Chromium itself. Use a system Chrome/Chromium, or set
 - **Trusted input.** Clicks and typing use real CDP input events (`Input.dispatchMouseEvent`), not synthetic `element.click()` DOM calls.
 - **Cross-origin iframes (OOPIF).** Auto-attaches out-of-process iframe targets with flattened CDP sessions.
 - **One engine, many surfaces.** The same Rust core backs the CLI, MCP server, and alpha language bindings.
-- **Smaller shipped MCP binary.** Fat LTO + PGO cut the linux x86_64 `rustwright-mcp` release binary from 16.776 MiB to 6.462 MiB (−61.5%), with a measured −14.6% process VmRSS on the PGO step ([`MEMORY_BENCH.md`](MEMORY_BENCH.md)).
 
 ## How it works
 
@@ -151,32 +137,40 @@ Local fingerprint runs — default Playwright failed webdriver/headless checks t
 > [!IMPORTANT]
 > **Rustwright is not "undetectable."** It is not a CAPTCHA or Cloudflare bypass, and it is not fully CDP-invisible — it still uses CDP primitives (`Target.setAutoAttach`, init scripts, and lazy `Runtime.enable` for console event/pageerror event/binding opt-ins). The claim is narrow: **no Playwright-specific automation fingerprint**, plus baseline signal hygiene.
 
-## Cost measurements
+## Benchmarks
 
-Reviewed, host-safe numbers for the shipped MCP binary (no browser launch in
-these samples). Methodology and re-run scripts: [`MEMORY_BENCH.md`](MEMORY_BENCH.md).
+### Client memory vs playwright-python
 
-**Binary size (`rustwright-mcp`, linux x86_64)**
+On a remote-CDP form-fill suite (browser off-box so Chromium is not in the
+sample), Rustwright's **client** peak PSS was about **4× smaller** than
+playwright-python's — median **28 MB vs 110 MB (−75%)**, smaller in every case
+(per-case range 25–69 vs 86–152 MB). That is the part the library controls:
+Rustwright speaks CDP in-process; playwright-python keeps a bundled Node driver
+(~102 MB of the older single-pair client stack). Whole-process memory with a
+local Chromium is still Chromium-dominated and roughly comparable.
 
-| Step | Size | Notes |
-|---|---:|---|
-| Default mcp release profile | 16.776 MiB | pre–fat-LTO baseline ([#7](https://github.com/beyondoss/rustwright/pull/7)) |
-| Fat LTO + strip + `panic=abort` | 7.748 MiB | **−53.8%** vs default |
-| PGO profile-use on fat-LTO | 6.462 MiB | **−16.7%** vs fat LTO; **−61.5%** vs default |
+Source: [`benchmarks/form_fill/RESULTS.md`](benchmarks/form_fill/RESULTS.md)
+(cloud CDP, 2026-07-16; 182/182 sessions). Older single-pair demos in
+[`BENCHMARK.md`](BENCHMARK.md#client-memory-form-fill-diagnostic) showed
+−69.6% / −71.0% on the same client-only basis; the cloud suite confirms and
+strengthens that finding at **−75%**.
 
-**Process RSS (`rustwright-mcp` VmRSS during host-safe protocol train)**
+### MCP release binary (not a Playwright comparison)
 
-| | Median VmRSS |
+Host-safe `rustwright-mcp` packaging on linux x86_64
+([`MEMORY_BENCH.md`](MEMORY_BENCH.md)):
+
+| Step | Size |
 |---|---:|
-| Fat LTO (no PGO) | 6340 KiB |
-| PGO | 5416 KiB (**−14.6%**) |
+| Default mcp release | 16.776 MiB |
+| Fat LTO + strip + `panic=abort` | 7.748 MiB (−53.8%) |
+| PGO on fat LTO | 6.462 MiB (−16.7% vs LTO; −61.5% vs default) |
 
-Protocol microbench median stayed within noise. Prefer
-`tools/build_mcp_pgo.sh` for native-host GitHub Release MCP assets.
+PGO also dropped MCP process VmRSS median **6340 → 5416 KiB (−14.6%)** on the
+protocol train (no Chromium). Prefer `tools/build_mcp_pgo.sh` for native-host
+release assets.
 
-Broader speed/memory suite methodology (including Testbox runs) lives in
-[`BENCHMARK.md`](BENCHMARK.md); do not treat unreproduced host Chromium-tree
-RSS as a headline.
+Broader suite methodology: [`BENCHMARK.md`](BENCHMARK.md).
 
 ## Alternatives
 
