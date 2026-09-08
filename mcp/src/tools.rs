@@ -79,7 +79,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::Find,
         name: "browser_find",
-        description: "Find text/regex; snapshot.",
+        description: "Find text/regex; snapshot. Provide exactly one of text or regex.",
     },
     ToolSpec {
         kind: ToolKind::Click,
@@ -89,7 +89,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::Scroll,
         name: "browser_scroll",
-        description: "Scroll ref/viewport; snapshot.",
+        description: "Scroll ref/viewport; snapshot. Provide exactly one of target or direction; pixels only with direction.",
     },
     ToolSpec {
         kind: ToolKind::Type,
@@ -99,7 +99,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::SelectOption,
         name: "browser_select_option",
-        description: "Select values/labels on ref.",
+        description: "Select values/labels on ref. Provide exactly one of value or values.",
     },
     ToolSpec {
         kind: ToolKind::FillForm,
@@ -159,7 +159,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::WaitFor,
         name: "browser_wait_for",
-        description: "Wait for time/text; snapshot.",
+        description: "Wait for time/text; snapshot. Provide at least one of time, text, or textGone.",
     },
     ToolSpec {
         kind: ToolKind::GetText,
@@ -695,6 +695,15 @@ pub(crate) fn parse_op(
             })
         }
         ToolKind::SelectOption => {
+            // `value` is a serde alias for `values`, so decoding alone already
+            // rejects both-at-once and neither-at-all - but as "duplicate field
+            // `values`" and "missing field `values`", which never name `value`.
+            // The schema no longer carries the rule (a root `oneOf` is rejected
+            // by strict providers), so this error is the only feedback a model
+            // gets: say what it actually did wrong.
+            if arguments.get("value").is_some() == arguments.get("values").is_some() {
+                return Err("exactly one of value or values is required".to_owned());
+            }
             let args: SelectOptionArgs = decode(arguments)?;
             validate_ref(&args.target)?;
             // An empty list is a deliberate request: it clears every selected
@@ -974,6 +983,20 @@ fn parse_regex(expression: &str) -> Result<RegexSpec, String> {
     })
 }
 
+// Every root schema is a plain `{"type": "object", ...}`: no `oneOf`, `anyOf`,
+// `allOf` or `not` at the top level. Strict providers reject a union there and
+// they validate the whole tool list as one request, so a single offending
+// schema takes down every tool. Observed verbatim:
+//   xAI      - "tool parameter root must be an object type (root schema is an
+//               anyOf/oneOf union with a non-object branch)"
+//   Anthropic - "input_schema does not support oneOf, allOf, or anyOf at the
+//               top level"
+// Mutually-exclusive and at-least-one rules therefore live in the tool
+// description (so the model knows them) and in `parse_op` (which enforces
+// them). The schema was never the enforcement; it was an unportable hint.
+// `root_schemas_are_plain_objects` fails the build if a union comes back.
+// Unions nested inside a property are untouched - both providers object only
+// to the root - and remain the right tool for a per-property type union.
 fn schema(kind: ToolKind) -> JsonObject {
     let ref_property = || {
         json!({
@@ -1010,13 +1033,10 @@ fn schema(kind: ToolKind) -> JsonObject {
             },
             "additionalProperties": false
         }),
+        // text xor regex; stated in the description, enforced in `parse_op`.
         ToolKind::Find => json!({
             "type": "object",
             "properties": {"text": {"type": "string"}, "regex": {"type": "string"}},
-            "oneOf": [
-                {"required": ["text"], "not": {"required": ["regex"]}},
-                {"required": ["regex"], "not": {"required": ["text"]}}
-            ],
             "additionalProperties": false
         }),
         ToolKind::Click => json!({
@@ -1029,6 +1049,8 @@ fn schema(kind: ToolKind) -> JsonObject {
             "required": ["target"],
             "additionalProperties": false
         }),
+        // target xor direction, and pixels only alongside direction; stated in
+        // the description, enforced in `parse_op`.
         ToolKind::Scroll => json!({
             "type": "object",
             "properties": {
@@ -1036,10 +1058,6 @@ fn schema(kind: ToolKind) -> JsonObject {
                 "direction": {"type": "string", "enum": ["up", "down"]},
                 "pixels": {"type": "number", "exclusiveMinimum": 0}
             },
-            "oneOf": [
-                {"required": ["target"], "not": {"anyOf": [{"required": ["direction"]}, {"required": ["pixels"]}]}},
-                {"required": ["direction"], "not": {"required": ["target"]}}
-            ],
             "additionalProperties": false
         }),
         ToolKind::Type => json!({
@@ -1055,6 +1073,8 @@ fn schema(kind: ToolKind) -> JsonObject {
             "required": ["target", "text"],
             "additionalProperties": false
         }),
+        // value xor values; stated in the description, enforced in `parse_op`.
+        // The per-property unions below are nested, not root, so they stay.
         ToolKind::SelectOption => json!({
             "type": "object",
             "properties": {
@@ -1074,10 +1094,6 @@ fn schema(kind: ToolKind) -> JsonObject {
                 "element": {"type": "string"}
             },
             "required": ["target"],
-            "oneOf": [
-                {"required": ["values"], "not": {"required": ["value"]}},
-                {"required": ["value"], "not": {"required": ["values"]}}
-            ],
             "additionalProperties": false
         }),
         ToolKind::FillForm => json!({
@@ -1211,6 +1227,8 @@ fn schema(kind: ToolKind) -> JsonObject {
             },
             "additionalProperties": false
         }),
+        // At least one of time/text/textGone; stated in the description,
+        // enforced in `parse_op`.
         ToolKind::WaitFor => json!({
             "type": "object",
             "properties": {
@@ -1219,7 +1237,6 @@ fn schema(kind: ToolKind) -> JsonObject {
                 "textGone": {"type": "string"},
                 "timeout_ms": {"type": "number", "minimum": 0, "default": 10000}
             },
-            "anyOf": [{"required": ["time"]}, {"required": ["text"]}, {"required": ["textGone"]}],
             "additionalProperties": false
         }),
         ToolKind::GetText => json!({
@@ -1426,6 +1443,118 @@ mod tests {
                 .all(|tool| tool.input_schema["type"] == "object"
                     && tool.input_schema["additionalProperties"] == false)
         );
+    }
+
+    #[test]
+    fn root_schemas_are_plain_objects() {
+        // Strict providers reject a `oneOf`/`anyOf`/`allOf`/`not` at the root of
+        // a tool schema, and they validate the whole tool list as one request:
+        // one bad schema makes every tool unusable. xAI answers "tool parameter
+        // root must be an object type (root schema is an anyOf/oneOf union with
+        // a non-object branch)" and Anthropic "input_schema does not support
+        // oneOf, allOf, or anyOf at the top level". Only the root is inspected;
+        // unions nested inside a property are legal and deliberately used.
+        const FORBIDDEN_ROOT_KEYWORDS: [&str; 4] = ["oneOf", "anyOf", "allOf", "not"];
+        assert_eq!(
+            TOOL_SPECS.len(),
+            27,
+            "every ToolKind must appear in TOOL_SPECS"
+        );
+        for spec in TOOL_SPECS {
+            let schema = schema(spec.kind);
+            assert_eq!(
+                schema["type"], "object",
+                "{} root is not an object",
+                spec.name
+            );
+            for keyword in FORBIDDEN_ROOT_KEYWORDS {
+                assert!(
+                    !schema.contains_key(keyword),
+                    "{} declares {keyword} at the root of its schema",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_argument_rules_are_documented_and_enforced() {
+        // The schema no longer carries these rules, so the description is the
+        // model's only warning and `parse_op` is the only enforcement. Both
+        // halves are asserted here: drop either and the tool silently degrades
+        // into constant invalid calls or unchecked arguments.
+        let catalog = catalog();
+        let spec = |name: &str| {
+            TOOL_SPECS
+                .iter()
+                .copied()
+                .find(|spec| spec.name == name)
+                .expect("named tool exists")
+        };
+        let rejects = |name: &str, arguments: Value| {
+            let arguments = arguments.as_object().expect("object arguments").clone();
+            assert!(
+                parse_op(spec(name), Some(arguments)).is_err(),
+                "{name} accepted arguments that violate its documented rule"
+            );
+        };
+        let accepts = |name: &str, arguments: Value| {
+            let arguments = arguments.as_object().expect("object arguments").clone();
+            assert!(
+                parse_op(spec(name), Some(arguments)).is_ok(),
+                "{name} rejected arguments that satisfy its documented rule"
+            );
+        };
+
+        assert!(
+            tool_description(&catalog, "browser_find")
+                .contains("Provide exactly one of text or regex.")
+        );
+        accepts("browser_find", json!({"text": "Sign in"}));
+        rejects("browser_find", json!({}));
+        rejects(
+            "browser_find",
+            json!({"text": "Sign in", "regex": "/sign/i"}),
+        );
+
+        assert!(
+            tool_description(&catalog, "browser_scroll").contains(
+                "Provide exactly one of target or direction; pixels only with direction."
+            )
+        );
+        accepts("browser_scroll", json!({"target": "e1"}));
+        accepts(
+            "browser_scroll",
+            json!({"direction": "down", "pixels": 200}),
+        );
+        rejects("browser_scroll", json!({}));
+        rejects(
+            "browser_scroll",
+            json!({"target": "e1", "direction": "down"}),
+        );
+        rejects("browser_scroll", json!({"target": "e1", "pixels": 200}));
+
+        assert!(
+            tool_description(&catalog, "browser_select_option")
+                .contains("Provide exactly one of value or values.")
+        );
+        accepts(
+            "browser_select_option",
+            json!({"target": "e1", "values": ["One"]}),
+        );
+        rejects("browser_select_option", json!({"target": "e1"}));
+        rejects(
+            "browser_select_option",
+            json!({"target": "e1", "value": "One", "values": ["Two"]}),
+        );
+
+        assert!(
+            tool_description(&catalog, "browser_wait_for")
+                .contains("Provide at least one of time, text, or textGone.")
+        );
+        accepts("browser_wait_for", json!({"textGone": "Loading"}));
+        rejects("browser_wait_for", json!({}));
+        rejects("browser_wait_for", json!({"timeout_ms": 500}));
     }
 
     #[test]
