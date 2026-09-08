@@ -102,10 +102,13 @@ Skip this section in prepare-only mode.
 3. Create an annotated `v<version>` tag on that commit using the GitHub noreply
    identity. Push only that tag. Never retag a branch commit, unmerged commit,
    stale commit, or untested commit.
-4. Build and upload the GitHub Release assets documented in
-   `docs/RELEASING.md` (at least the `rustwright-cli-<target>` names expected by
-   `install.sh`). Attach `rustwright-mcp` binaries when shipping the MCP
-   server; for native-host MCP assets prefer `tools/build_mcp_pgo.sh`.
+4. Create (or publish) the GitHub Release for `v<version>`. That triggers
+   `.github/workflows/release.yml`, which builds and uploads the
+   `rustwright-cli-<target>` / `rustwright-mcp-<target>` assets documented in
+   `docs/RELEASING.md`. Wait for that workflow to finish; do not hand-build
+   unless CI is broken. To backfill an existing empty Release, dispatch the
+   workflow with the tag. Optional native-host PGO for MCP remains
+   `tools/build_mcp_pgo.sh` outside CI.
 
 ## 5. Verify and report
 

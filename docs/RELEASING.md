@@ -62,19 +62,26 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
 
 - [ ] Merge the release PR.
 - [ ] Tag the merge commit `v${VERSION}` and push the tag.
-- [ ] Build release binaries for the supported targets (at least the
-      `rustwright-cli-<target>` names expected by `install.sh`).
-- [ ] Create a GitHub Release for the tag and upload those assets. Put release
-      notes on the GitHub Release itself (there is no in-repo changelog).
-- [ ] Confirm `install.sh` (or an equivalent curl install path) downloads the
-      new CLI asset successfully on a clean machine.
+- [ ] Create a GitHub Release for that tag (release notes live on the Release
+      itself; there is no in-repo changelog). Publishing the Release triggers
+      `.github/workflows/release.yml`, which builds and uploads:
+      - `rustwright-cli-<target>` for the four triples `install.sh` understands
+        (`x86_64` / `aarch64` × `unknown-linux-gnu` / `apple-darwin`)
+      - matching `rustwright-mcp-<target>` assets
+- [ ] Confirm the Release assets appear, then that `install.sh` (or an
+      equivalent curl install path) downloads the new CLI asset on a clean
+      machine.
 
-`rustwright-mcp` may be attached the same way when shipping the MCP server.
+To rebuild or backfill assets on an existing Release (for example after fixing
+the workflow), run **Actions → Release binaries → Run workflow** and pass the
+tag (`v0.1.0`). Uploads use `--clobber`, so re-runs replace prior assets.
+
 `cli/` and `mcp/` version independently from the shared library version when
-needed.
+needed. Linux GNU targets are linked with Zig against glibc 2.17 for broader
+distro coverage (same approach as the former npm native builds).
 
-For native-host `rustwright-mcp` release assets, prefer
-`tools/build_mcp_pgo.sh` (fat LTO + profile-guided optimization; host-safe
-training, no browser). See `MEMORY_BENCH.md` for the measured size / process
-RSS deltas. Cross-compiled targets without a matching native train stay on a
-plain release build.
+For a one-off native-host `rustwright-mcp` build with measured size / RSS wins,
+prefer `tools/build_mcp_pgo.sh` (fat LTO + profile-guided optimization;
+host-safe training, no browser) and upload that binary manually. See
+`MEMORY_BENCH.md`. CI release assets stay on the plain release profile so
+cross targets and PGO training do not block publishing.
