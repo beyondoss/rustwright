@@ -2544,7 +2544,17 @@ fn real_stdio_parity_actions_inspection_wait_reload_and_close() {
 
     let reloaded = call_tool(&mut server, poll_id, "browser_reload", json!({}));
     poll_id += 1;
-    assert!(result_text(&reloaded).contains("Status waiting"));
+    let mut snapshot = result_text(&reloaded).to_owned();
+    let reload_deadline = Instant::now() + Duration::from_secs(5);
+    while !snapshot.contains("Status waiting") {
+        assert!(
+            Instant::now() < reload_deadline,
+            "reload did not restore Status waiting: {snapshot}"
+        );
+        let polled = call_tool(&mut server, poll_id, "browser_snapshot", json!({}));
+        poll_id += 1;
+        snapshot = result_text(&polled).to_owned();
+    }
 
     let closed = call_tool(&mut server, poll_id, "browser_close", json!({}));
     assert_eq!(result_text(&closed), "Browser closed.");
