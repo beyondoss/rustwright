@@ -326,12 +326,15 @@ Node driver, the client stack is far lighter:
 | Local, client share at stack peak (PSS) | 130.0 MiB | 37.8 MiB | −71.0% |
 
 The bundled Node driver alone accounts for ~102 MiB of Playwright's client
-footprint; Rustwright ships none, which is the source of the ~70% reduction
-(the "70% less memory" figure in the README and banner). These are
-**demo-grade, single-pair recordings** — the remote pair ran over an
-uncontrolled WAN and the exact build commit was not pinned — illustrative of
-the driver-free architecture, not a durable capped-CI benchmark. Durable
-numbers should come from repeated, capped runs.
+footprint; Rustwright ships none, which is the source of the large client-side
+reduction. These are **demo-grade, single-pair recordings** — the remote pair
+ran over an uncontrolled WAN and the exact build commit was not pinned —
+illustrative of the driver-free architecture, not a durable capped-CI
+benchmark. The cloud form-fill suite in
+[`benchmarks/form_fill/RESULTS.md`](benchmarks/form_fill/RESULTS.md) later
+measured median client PSS **28 MB vs 110 MB (−75% / ~4×)** across 182
+sessions; prefer that figure for README claims. Durable numbers should still
+come from repeated, capped runs.
 
 ## Avoid Host/Main Chrome
 
