@@ -28,15 +28,13 @@ mature, and the copies drift. Two concrete failures shaped the current split:
 - The remote-CDP premature-timeout bug (#96) existed because the actionability
   deadline lived in Python while the per-probe cap lived in the core — two
   timeout engines disagreed across the FFI boundary.
-- The Node evaluate decoder used an outdated tag vocabulary. That Node tag drift
-  is fixed.
 
 The compatibility split is intentional:
 
 - Core `decode_wire_value` and C ABI `rw_decode_wire` remain the flattened plain
   JSON path. They duplicate repeated references and use the cycle sentinel.
 - Go and rust-native already use core structural decoding.
-- Python and Node use native graph adapters that preserve host object identity
+- Python uses a native graph adapter that preserves host object identity
   and cycles.
 - Java, C#/.NET, Ruby, and PHP use the opaque C graph API. Their shims only
   allocate host values, connect graph edges, and map leaf values.
@@ -79,9 +77,8 @@ C-ABI bindings.
 | `python/playwright/*`, `python/patchright/*`, `python/cloakbrowser/*` | Compatibility import packages. Public alpha compatibility imports should be enabled only through opt-in compatibility mode. |
 | `rust-native/` | Native Rust facade crate over `rustwright-core` (crates.io `rustwright`); the shared actor consumes this facade. |
 | `agent/` | Transport-independent native actor: browser session, tabs, refs, snapshots, actions, cancellation, file confinement, and structured errors. |
-| `mcp/` | `rustwright-mcp`: MCP schemas, request-ID adaptation, response shaping, stdio transport, and npm packaging over `rustwright-agent`. |
+| `mcp/` | `rustwright-mcp`: MCP schemas, request-ID adaptation, response shaping, and stdio transport over `rustwright-agent`. |
 | `cli/` | Persistent daemon and command/output adapter over `rustwright-agent`; it does not own browser or ref semantics. |
-| `node/` | napi-rs binding (in-process, links `rustwright-core` directly). |
 | `capi/` | Shared C ABI (`librustwright_capi`) over `rustwright-core`; the boundary for the Go/Java/C#/Ruby/PHP bindings. |
 | `go/`, `java/`, `csharp/`, `ruby/`, `php/` | C-ABI language bindings (alpha surface) + per-language conformance runners. |
 | `bindings/` | Cross-binding contract (`CONTRACT.md`) and shared conformance case data. |
@@ -119,7 +116,6 @@ The core graph parser establishes the evaluate-wire and launch-parser ownership 
 | rust-native | In-process facade that already uses core structural decoding and maps leaf values. |
 | C ABI | Legacy flattened JSON decoder plus an opaque identity-preserving graph API; both use the core parser. |
 | Java / C#/.NET / Ruby / PHP | Two-pass host materializers over the opaque C graph API; leaf conversion stays language-native. |
-| Node | napi native graph adapter; the typed camelCase coercion veneer remains in Node. |
 
 The remaining cross-shim concerns have these owners:
 
@@ -136,8 +132,8 @@ The remaining cross-shim concerns have these owners:
 Ordered tracks; each is independently landable and keeps parity tests green.
 
 1. **Core evaluate-wire graph and launch parsing (this change).** Keep the
-   legacy C ABI decoder flattened for compatibility. Use native graph adapters
-   in Python and Node, and retain core structural decoding in Go and
+   legacy C ABI decoder flattened for compatibility. Use a native graph adapter
+   in Python, and retain core structural decoding in Go and
    rust-native.
 2. **Expose the graph through the C ABI (this change).** Java, C#/.NET, Ruby,
    and PHP materialize the opaque core graph instead of parsing wire wrappers,

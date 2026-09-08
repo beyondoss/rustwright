@@ -4,6 +4,15 @@ All notable user-facing changes to Rustwright are documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- Dropped PyPI, npm, MCP-npm, NuGet, RubyGems, and Maven Central release
+  workflows. This fork ships prebuilt binaries as GitHub Release assets.
+- Removed the Node.js/napi binding (`node/`), MCP npm packaging (`mcp/npm/`),
+  and unused Node quickstart/benchmark binding scripts.
+- Removed stale Python MCP deprecation docs; the native `rustwright-mcp`
+  server is the only MCP path.
+
 ### Breaking
 
 - Removed `disable_playwright_compat()`. Compatibility aliases are now a one-way

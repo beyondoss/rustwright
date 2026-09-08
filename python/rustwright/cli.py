@@ -1561,8 +1561,7 @@ def _mcp_main(argv: Sequence[str], *, program: str) -> int:
     if binary is None:
         print(
             "rustwright mcp requires the native rustwright-mcp server binary; "
-            "install it with: cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp\n"
-            "or install the rustwright-mcp npm package once it is published",
+            "install it with: cargo install --git https://github.com/Skyvern-AI/rustwright rustwright-mcp",
             file=sys.stderr,
         )
         return 1
