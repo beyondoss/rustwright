@@ -34,7 +34,8 @@ fn browser_session_navigates_snapshots_and_acts_on_refs() {
     let mut session = BrowserSession::new(LaunchConfig {
         headed: false,
         executable_path,
-    });
+    })
+    .unwrap();
     let opened = session
         .execute(BrowserAction::Open {
             url: Some(format!("http://{address}")),

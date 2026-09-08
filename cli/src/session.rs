@@ -52,7 +52,7 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
-    pub fn new(launch: LaunchConfig) -> Self {
+    pub fn new(launch: LaunchConfig) -> Result<Self> {
         let mut options = LaunchOptions::default().headless(!launch.headed);
         if let Some(path) = launch.executable_path {
             options = options.executable_path(path);
@@ -63,12 +63,13 @@ impl BrowserSession {
                 default_timeout: DEFAULT_COMMAND_TIMEOUT,
                 ..ActorConfig::default()
             },
-        );
-        Self {
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(Self {
             actor,
             next_request_id: 1,
             closed: false,
-        }
+        })
     }
 
     pub fn execute(&mut self, action: BrowserAction) -> Result<Value> {

@@ -45,7 +45,9 @@ impl BrowserServer {
         let screenshot_temp_dir = ScreenshotTempDir::new()?;
         let features = FeatureConfig::from_env();
         Ok(Self {
-            actor: Arc::new(BrowserActor::spawn()),
+            actor: Arc::new(BrowserActor::spawn().map_err(|error| {
+                io::Error::new(io::ErrorKind::Other, error.to_string())
+            })?),
             screenshot_max_bytes: screenshot_max_bytes_from_env(),
             screenshot_temp_dir,
             features,
