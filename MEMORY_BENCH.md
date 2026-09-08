@@ -32,6 +32,10 @@ Rustwright keeps its client in the measured Python process. The harness does not
 attempt to classify driver children separately from Chromium, because command
 names and process layouts vary by browser build and platform.
 
+For release **binary** cost (size / strip / LTO), use the host-safe helper
+`tools/measure_release_binary_cost.sh` — no browser launch. Keep raw outputs
+under ignored `.benchmark-data/`.
+
 For repeated runs, the raw peak remains in every `results` item and `aggregate`
 contains distribution summaries for both RSS fields. Benchmark output belongs
 under the ignored `.benchmark-data/` directory; do not commit raw result JSON,

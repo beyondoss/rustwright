@@ -3016,6 +3016,11 @@ impl BrowserState {
             renderer_incomplete_index,
         });
         self.commit_snapshot_refs(&value, start_ref)?;
+        // Observation complete: drop prior-navigation / high-water retained
+        // history so long MCP sessions do not keep peak RSS as idle RSS.
+        if let Some(page) = self.page.as_ref() {
+            page.trim_retained_memory();
+        }
         Ok(self
             .response_shape
             .as_ref()

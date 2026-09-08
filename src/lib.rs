@@ -454,6 +454,11 @@ impl Drop for SpawnedTaskAbortGuard {
 const CDP_EVENT_LOG_LIMIT: usize = 8192;
 const CDP_EVENT_LOG_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CDP_EVENT_LOG_MAX_ENTRY_BYTES: usize = 64 * 1024;
+/// Soft idle watermark for long-lived sessions. Peak traffic may still fill
+/// up to `CDP_EVENT_LOG_MAX_*`; `trim_retained_idle` drains back to these.
+const CDP_EVENT_LOG_IDLE_MAX_BYTES: usize = 1024 * 1024;
+const CDP_EVENT_LOG_IDLE_MAX_ENTRIES: usize = 1024;
+const NETWORK_REQUEST_IDLE_MAX_ENTRIES: usize = 1024;
 const CDP_RETAINED_STRING_MAX_BYTES: usize = 8 * 1024;
 const CDP_RETAINED_ARRAY_MAX_ITEMS: usize = 128;
 const CDP_DIAGNOSTIC_TRAFFIC_LIMIT: usize = 32;
@@ -23087,6 +23092,68 @@ return this.dataset.mainWorldOverride === "observed";
     }
 
     #[test]
+    fn trim_retained_idle_drains_event_log_below_soft_watermark() {
+        let mut log = CdpEventLog::new();
+        // Keep entries small so the hard 8 MiB / 8192 caps do not hide the soft
+        // idle watermark under test.
+        for index in 0..(CDP_EVENT_LOG_IDLE_MAX_ENTRIES * 2) {
+            log.push(json!({
+                "sessionId": "page-session",
+                "method": "Runtime.consoleAPICalled",
+                "params": {
+                    "type": "log",
+                    "args": [{ "type": "string", "value": format!("msg-{index}") }]
+                }
+            }));
+        }
+        assert_eq!(log.events.len(), CDP_EVENT_LOG_IDLE_MAX_ENTRIES * 2);
+        let before_bytes = log.retained_bytes;
+        assert!(before_bytes > 0);
+        log.trim_retained_idle();
+        assert!(log.events.len() <= CDP_EVENT_LOG_IDLE_MAX_ENTRIES);
+        assert!(log.retained_bytes <= before_bytes);
+        assert!(log.retained_bytes < before_bytes);
+    }
+
+    #[test]
+    fn trim_retained_idle_bounds_network_request_store() {
+        let mut store = NetworkRequestStore::new(0);
+        for index in 0..(NETWORK_REQUEST_IDLE_MAX_ENTRIES + 32) {
+            let request_id = format!("req-{index}");
+            let request = json!({
+                "request_id": request_id,
+                "url": format!("https://example.test/{index}"),
+                "method": "GET",
+                "headers": {},
+                "post_data": Value::Null,
+            });
+            store.requests.insert(
+                request_id.clone(),
+                NetworkRequestEntry {
+                    current: NetworkRequestSnapshot {
+                        seq: index as u64,
+                        request: request.clone(),
+                        redirect_ancestry: Vec::new(),
+                    },
+                    applied_by_seq: BTreeMap::from([(
+                        index as u64,
+                        NetworkRequestSnapshot {
+                            seq: index as u64,
+                            request,
+                            redirect_ancestry: Vec::new(),
+                        },
+                    )]),
+                },
+            );
+            store.record_applied_request(index as u64, request_id);
+        }
+        assert!(store.applied_order.len() > NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+        store.trim_retained_idle();
+        assert!(store.applied_order.len() <= NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+        assert!(store.requests.len() <= NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+    }
+
+    #[test]
     fn cdp_event_log_tombstones_payloads_that_remain_oversized_after_compaction() {
         let mut log = CdpEventLog::new();
         let event = json!({
@@ -25727,6 +25794,14 @@ fn strip_retained_heavy_payloads(event: &mut Value) {
                     if let Some(entries) = object.get_mut("postDataEntries") {
                         *entries = retained_post_data_entries(Some(entries));
                     }
+                    // Cookie / auth headers dominate retained request size; keep
+                    // catch-up shape but bound each header value to the shared
+                    // string budget.
+                    if let Some(Value::Object(headers)) = object.get_mut("headers") {
+                        for value in headers.values_mut() {
+                            compact_retained_cdp_value(value);
+                        }
+                    }
                 }
             }
         }
@@ -26164,6 +26239,22 @@ impl CdpEventLog {
         self.console_replay_cutoffs = HashMap::new();
         self.console_replay_cutoff_generations = HashMap::new();
         self.console_replay_cutoff_cancellations = HashMap::new();
+    }
+
+    /// Drain retained events back to the soft idle watermark without disabling
+    /// retention. Safe to call while the browser stays open (agent/MCP between
+    /// tools). Dropped events may force catch-up overflow resets for lagging
+    /// subscribers — the same outcome as natural log eviction at the hard caps.
+    fn trim_retained_idle(&mut self) {
+        while self.events.len() > CDP_EVENT_LOG_IDLE_MAX_ENTRIES
+            || self.retained_bytes > CDP_EVENT_LOG_IDLE_MAX_BYTES
+        {
+            let Some(evicted) = self.events.pop_front() else {
+                break;
+            };
+            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.retained_bytes);
+        }
+        self.prune_console_replay_cutoffs();
     }
 
     fn entries_since(&self, cursor: u64) -> Vec<(u64, Value)> {
@@ -28826,6 +28917,36 @@ impl PageInner {
             .store(false, Ordering::SeqCst);
     }
 
+    /// Soft-trim page-owned retained stores and the shared CDP event log back
+    /// toward idle watermarks without closing the page or disabling retention.
+    fn trim_retained_memory(&self) {
+        if self.lifecycle.is_closing_or_closed() || self.target_closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let retention_gate = self.browser.client.retention_gate();
+        let Some(_retention_guard) = retention_gate.lock_for_write() else {
+            return;
+        };
+        self.browser
+            .client
+            .event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.network_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.console_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.native_network_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+    }
+
     fn close_in_background(&self) {
         self.clear_worker_resume_handoffs();
         self.abort_iframe_setup_tasks();
@@ -28931,6 +29052,29 @@ impl NetworkRequestStore {
     }
     fn clear_for_close(&mut self) {
         self.reset_after_overflow(self.next_applied_seq);
+    }
+
+    fn trim_retained_idle(&mut self) {
+        while self.applied_order.len() > NETWORK_REQUEST_IDLE_MAX_ENTRIES {
+            let Some((oldest_seq, oldest_request_id)) = self.applied_order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.requests.get_mut(&oldest_request_id) {
+                entry.applied_by_seq.remove(&oldest_seq);
+                if let Some((_, newest)) = entry.applied_by_seq.last_key_value() {
+                    entry.current = newest.clone();
+                }
+            }
+        }
+        self.requests.retain(|_, entry| {
+            if entry.applied_by_seq.is_empty() {
+                return false;
+            }
+            if let Some((_, newest)) = entry.applied_by_seq.last_key_value() {
+                entry.current = newest.clone();
+            }
+            true
+        });
     }
 
     fn record_applied_request(&mut self, seq: u64, request_id: String) {
@@ -29110,6 +29254,20 @@ impl ConsoleRecordStore {
         self.evictions_by_epoch = HashMap::new();
         self.evictions_total = 0;
     }
+
+    fn trim_retained_idle(&mut self) {
+        let epoch = self.navigation_epoch;
+        let before = self.records.len();
+        self.records
+            .retain(|record| record.navigation_epoch == epoch);
+        let dropped = before.saturating_sub(self.records.len()) as u64;
+        if dropped > 0 {
+            self.evictions_total = self.evictions_total.saturating_add(dropped);
+        }
+        self.evictions_by_epoch
+            .retain(|stored_epoch, _| *stored_epoch == epoch);
+    }
+
     fn reset_after_unreplayable(&mut self) {
         let epoch = self.navigation_epoch;
         self.accepted_navigation_epochs = AcceptedNavigationEpochs::default();
@@ -29258,6 +29416,24 @@ impl NativeNetworkRecordStore {
         self.active_by_request = HashMap::new();
         self.evictions_by_epoch = HashMap::new();
     }
+
+    fn trim_retained_idle(&mut self) {
+        let epoch = self.navigation_epoch;
+        let before = self.records.len();
+        self.records.retain(|entry| entry.record.navigation_epoch == epoch);
+        let dropped = before.saturating_sub(self.records.len());
+        if dropped > 0 {
+            *self.evictions_by_epoch.entry(epoch).or_default() += dropped as u64;
+        }
+        self.active_by_request.retain(|_, index| {
+            self.records
+                .iter()
+                .any(|entry| entry.record.index == *index)
+        });
+        self.evictions_by_epoch
+            .retain(|stored_epoch, _| *stored_epoch == epoch);
+    }
+
     fn reset_after_unreplayable(&mut self) {
         let epoch = self.navigation_epoch;
         self.accepted_navigation_epochs = AcceptedNavigationEpochs::default();
@@ -45224,6 +45400,12 @@ impl RustwrightPage {
 
     pub fn url(&self) -> String {
         self.inner.cached_main_frame_url().unwrap_or_default()
+    }
+
+    /// Soft-trim retained CDP / network / console buffers toward idle watermarks
+    /// without closing the page. Intended for long-lived agent sessions.
+    pub fn trim_retained_memory(&self) {
+        self.inner.trim_retained_memory();
     }
 
     /// Set or clear this page's general default timeout in milliseconds.
