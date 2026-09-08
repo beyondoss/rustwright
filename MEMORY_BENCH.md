@@ -36,9 +36,10 @@ For release **binary** cost (size / strip / LTO), use the host-safe helper
 `tools/measure_release_binary_cost.sh` — no browser launch. Keep raw outputs
 under ignored `.benchmark-data/`.
 
-For MCP **PGO** before/after (size + protocol microbench), use
-`tools/measure_mcp_pgo.sh` / `tools/build_mcp_pgo.sh` — trains with
-`tools/pgo_train_mcp.py` plus `cargo test --bin rustwright-mcp` (no browser).
+For MCP **PGO** before/after (size + protocol microbench + process VmRSS), use
+`tools/measure_mcp_pgo.sh`, `tools/measure_mcp_pgo_rss.sh`, and
+`tools/build_mcp_pgo.sh` — trains with `tools/pgo_train_mcp.py` plus
+`cargo test --bin rustwright-mcp` (no browser; MCP process RSS only).
 
 For repeated runs, the raw peak remains in every `results` item and `aggregate`
 contains distribution summaries for both RSS fields. Benchmark output belongs
