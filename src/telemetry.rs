@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn telemetry_disabled_honors_truth_table_and_all_variable_names() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _snapshot = EnvSnapshot::clear();
 
         assert!(!telemetry_disabled());

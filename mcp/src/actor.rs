@@ -26,7 +26,7 @@ pub(crate) struct BrowserActor {
 }
 
 impl BrowserActor {
-    pub(crate) fn spawn() -> Self {
+    pub(crate) fn spawn() -> Result<Self, BrowserError> {
         let startup = browser_startup_from_env();
         let config = ActorConfig {
             distill: true,
@@ -36,11 +36,11 @@ impl BrowserActor {
             default_timeout: tool_timeout_from_env(),
             workspace: env::var_os("RUSTWRIGHT_MCP_WORKSPACE").map(Into::into),
         };
-        Self {
+        Ok(Self {
             inner: Arc::new(NativeBrowserActor::spawn_with_startup_and_config(
                 startup, config,
-            )),
-        }
+            )?),
+        })
     }
 
     pub(crate) async fn execute(&self, request_id: McpRequestId, op: BrowserOp) -> BrowserResult {

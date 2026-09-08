@@ -4,7 +4,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     fmt, fs,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, Weak,
@@ -948,11 +948,11 @@ impl CommandCancellation {
     }
 
     fn set_detail(&self, detail: String) {
-        *self.detail.lock().unwrap() = Some(detail);
+        *self.detail.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(detail);
     }
 
     fn detail(&self) -> Option<String> {
-        self.detail.lock().unwrap().clone()
+        self.detail.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 }
 
@@ -994,7 +994,7 @@ impl ActorShared {
     }
 
     fn submit(&self, request: ActorRequest) -> Result<(), BrowserError> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if queue.closed {
             return Err(BrowserError::Stopped);
         }
@@ -1007,7 +1007,7 @@ impl ActorShared {
     }
 
     fn next(&self) -> Option<ActorRequest> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
             if let Some(request) = queue.queued.pop_front() {
                 queue.in_flight = Some(InFlight {
@@ -1019,7 +1019,7 @@ impl ActorShared {
             if queue.closed {
                 return None;
             }
-            queue = self.ready.wait(queue).unwrap();
+            queue = self.ready.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 
@@ -1028,7 +1028,7 @@ impl ActorShared {
         T: Into<BrowserOutput>,
     {
         let result = result.map(Into::into);
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if queue
             .in_flight
             .as_ref()
@@ -1064,7 +1064,7 @@ impl ActorShared {
 
     fn cancel(&self, request_id: &RequestId, reason: CancellationReason) -> bool {
         let queued = {
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(index) = queue
                 .queued
                 .iter()
@@ -1098,7 +1098,7 @@ impl ActorShared {
 
     fn shutdown(&self) {
         let queued = {
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             queue.closed = true;
             if let Some(in_flight) = &queue.in_flight {
                 let _ = in_flight.cancellation.cancel(CancellationReason::Cancelled);
@@ -1113,7 +1113,7 @@ impl ActorShared {
 
     #[cfg(test)]
     fn queued_len(&self) -> usize {
-        self.queue.lock().unwrap().queued.len()
+        self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).queued.len()
     }
 }
 
@@ -1146,31 +1146,36 @@ pub struct BrowserActor {
 }
 
 impl BrowserActor {
-    pub fn spawn() -> Self {
+    pub fn spawn() -> Result<Self, BrowserError> {
         Self::spawn_with_config(ActorConfig::default())
     }
 
-    pub fn spawn_with_config(config: ActorConfig) -> Self {
+    pub fn spawn_with_config(config: ActorConfig) -> Result<Self, BrowserError> {
         Self::spawn_with_startup_and_config(BrowserStartup::Local, config)
     }
 
-    pub fn spawn_with_startup(startup: BrowserStartup) -> Self {
+    pub fn spawn_with_startup(startup: BrowserStartup) -> Result<Self, BrowserError> {
         Self::spawn_with_startup_and_config(startup, ActorConfig::default())
     }
 
-    pub fn spawn_with_startup_and_config(startup: BrowserStartup, config: ActorConfig) -> Self {
+    pub fn spawn_with_startup_and_config(
+        startup: BrowserStartup,
+        config: ActorConfig,
+    ) -> Result<Self, BrowserError> {
         let default_timeout = config.default_timeout;
         let shared = Arc::new(ActorShared::new());
         let actor_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("rustwright-agent-actor".to_owned())
             .spawn(move || actor_main(actor_shared, startup, config))
-            .expect("failed to spawn browser actor");
-        Self {
+            .map_err(|error| {
+                BrowserError::Message(format!("failed to spawn browser actor: {error}"))
+            })?;
+        Ok(Self {
             shared,
             default_timeout,
             thread: Mutex::new(Some(thread)),
-        }
+        })
     }
 
     pub async fn execute(&self, request_id: RequestId, op: BrowserOp) -> BrowserResult {
@@ -6180,11 +6185,16 @@ fn write_text_output(
             "{purpose} output file already exists"
         )));
     }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&resolved)
-        .map_err(|error| BrowserError::Message(format!("{purpose} output failed: {error}")))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(&resolved).map_err(|error| {
+        BrowserError::Message(format!("{purpose} output failed: {error}"))
+    })?;
     if let Err(error) = output.write_all(content.as_bytes()) {
         drop(output);
         let _ = fs::remove_file(&resolved);
@@ -6199,7 +6209,26 @@ fn read_drop_files(workspace: Option<&Path>, paths: &[String]) -> Result<Vec<Val
     let confined = confine_workspace_files(workspace, paths)?;
     let mut files = Vec::with_capacity(paths.len());
     for (requested, resolved) in paths.iter().zip(confined) {
-        let bytes = fs::read(&resolved).map_err(|error| {
+        // Open once and read from the file handle so metadata and bytes agree
+        // after the canonicalize/confine check (no second path-based open).
+        let mut file = fs::File::open(&resolved).map_err(|error| {
+            BrowserError::Message(format!("file input read failed: {requested}: {error}"))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            BrowserError::Message(format!("file input metadata failed: {requested}: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(BrowserError::Message(format!(
+                "file input is not a regular file: {requested}"
+            )));
+        }
+        if metadata.len() > MAX_FILE_INPUT_BYTES {
+            return Err(BrowserError::Message(format!(
+                "file input exceeds the {MAX_FILE_INPUT_BYTES}-byte per-file cap: {requested}"
+            )));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
             BrowserError::Message(format!("file input read failed: {requested}: {error}"))
         })?;
         let name = resolved
@@ -6326,7 +6355,7 @@ pub fn production_form_fill_unknown_outcome_result() -> BrowserResult {
         reply,
     };
     let shared = ActorShared::new();
-    shared.queue.lock().unwrap().in_flight = Some(InFlight {
+    shared.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).in_flight = Some(InFlight {
         request_id: request.request_id.clone(),
         cancellation: Arc::clone(&request.cancellation),
     });
@@ -6735,7 +6764,7 @@ mod tests {
             lifecycle_count.fetch_add(1, Ordering::SeqCst);
             lifecycle_rx
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take()
                 .map(|receiver| Box::new(receiver) as Box<dyn LifecycleReceiver>)
         });
@@ -6786,7 +6815,7 @@ mod tests {
         }
 
         fn registration_arm_console_capture(&self) -> Result<(), Error> {
-            let mut state = self.control.0.lock().unwrap();
+            let mut state = self.control.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let arms = state.arms;
             state.arms += 1;
             if arms == 0 {
@@ -6853,7 +6882,7 @@ mod tests {
             &mut self,
             _request: &ActorRequest,
         ) -> Result<PageCandidate, BrowserError> {
-            self.0.lock().unwrap().attach_calls += 1;
+            self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).attach_calls += 1;
             Ok(self.candidate("remote"))
         }
 
@@ -6862,7 +6891,7 @@ mod tests {
             _request: &ActorRequest,
         ) -> Result<Vec<PageCandidate>, BrowserError> {
             let inventory = {
-                let mut state = self.0.lock().unwrap();
+                let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.discovery_calls += 1;
                 state.inventory.clone()
             };
@@ -6877,7 +6906,7 @@ mod tests {
             page: &ActivePageHandle,
             _request: &ActorRequest,
         ) -> Result<(), BrowserError> {
-            let mut state = self.0.lock().unwrap();
+            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.close_calls += 1;
             state
                 .inventory
@@ -6886,7 +6915,7 @@ mod tests {
         }
 
         fn new_page(&mut self, _request: &ActorRequest) -> Result<PageCandidate, BrowserError> {
-            let mut state = self.0.lock().unwrap();
+            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.new_calls += 1;
             state.inventory.push("replacement".to_owned());
             drop(state);
@@ -6926,7 +6955,7 @@ mod tests {
                 .target_id();
             assert_eq!(target_id, "remote");
             assert!(state.pages.contains_key("remote"));
-            let observed = control.0.lock().unwrap();
+            let observed = control.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(observed.attach_calls, 2);
             assert_eq!(observed.arms, 2);
         }
@@ -6965,7 +6994,7 @@ mod tests {
             .target_id();
         assert_eq!(target_id, "replacement");
         assert!(state.pages.contains_key("replacement"));
-        let observed = control.0.lock().unwrap();
+        let observed = control.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(observed.close_calls, 1);
         assert_eq!(observed.new_calls, 1);
         assert_eq!(observed.arms, 2);
@@ -7027,7 +7056,7 @@ mod tests {
             _browser: Option<&Browser>,
             _request: &ActorRequest,
         ) -> Result<Vec<BrowserInventoryEntry>, BrowserError> {
-            let mut state = self.0.0.lock().unwrap();
+            let mut state = self.0.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.inventory_queries += 1;
             if state.inventory_error {
                 return Err(BrowserError::Message("inventory unavailable".to_owned()));
@@ -7044,7 +7073,7 @@ mod tests {
         }
 
         fn active_page(&mut self, _page: Option<&ActivePageHandle>) -> Option<(String, String)> {
-            self.0.0.lock().unwrap().active.clone()
+            self.0.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).active.clone()
         }
 
         fn pending_modal(
@@ -7052,11 +7081,11 @@ mod tests {
             _pages: &HashMap<String, PageRuntime>,
             target_id: &str,
         ) -> bool {
-            self.0.0.lock().unwrap().modal_targets.contains(target_id)
+            self.0.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).modal_targets.contains(target_id)
         }
 
         fn observe(&mut self, _page: Option<&Page>, _request: &ActorRequest) -> PageObservation {
-            let mut state = self.0.0.lock().unwrap();
+            let mut state = self.0.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.observation_queries += 1;
             state.observation.clone()
         }
@@ -7086,11 +7115,11 @@ mod tests {
         }
 
         fn registration_events(&self) -> Option<Box<dyn PageEventReceiver>> {
-            self.events.lock().unwrap().take()
+            self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
         }
 
         fn registration_details(&self) -> Option<Box<dyn DetailReceiver>> {
-            self.details.lock().unwrap().take()
+            self.details.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
         }
 
         fn registration_url(&self) -> String {
@@ -7106,7 +7135,7 @@ mod tests {
         state.lifecycle_subscription_provider = Box::new(move |_| {
             receiver
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take()
                 .map(|receiver| Box::new(receiver) as Box<dyn LifecycleReceiver>)
         });
@@ -7129,7 +7158,7 @@ mod tests {
         config.header = true;
         let mut state = BrowserState::new(BrowserStartup::Local, config);
         let query = FakeBrowserQueryControl::new(inventory.clone(), Some(inventory[0].clone()));
-        query.0.lock().unwrap().observation = (Some("Active".to_owned()), Some((1, 2)));
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observation = (Some("Active".to_owned()), Some((1, 2)));
         state.browser_query_provider = query.provider();
         let request = digest_request();
         assert_eq!(
@@ -7140,7 +7169,7 @@ mod tests {
         );
         assert_eq!(state.page_digest(&request), None);
 
-        query.0.lock().unwrap().active = Some(inventory[1].clone());
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).active = Some(inventory[1].clone());
         assert!(state.page_digest(&request).unwrap().contains("/background"));
         assert_eq!(
             state
@@ -7163,7 +7192,7 @@ mod tests {
             .clone()
             .unwrap();
         state.inventory_stale = true;
-        query.0.lock().unwrap().inventory.reverse();
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).inventory.reverse();
         assert!(state.page_digest(&request).is_some());
         assert_eq!(
             state.tab_order,
@@ -7190,13 +7219,13 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(query.0.lock().unwrap().inventory_queries, 2);
+        assert_eq!(query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).inventory_queries, 2);
 
         state.inventory_stale = true;
         query
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .inventory
             .iter_mut()
             .find(|(target_id, _)| target_id == "active")
@@ -7207,7 +7236,7 @@ mod tests {
             state.tab_inventory["active"],
             "https://example.test/active/reconciled"
         );
-        assert_eq!(query.0.lock().unwrap().inventory_queries, 3);
+        assert_eq!(query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).inventory_queries, 3);
 
         state
             .pages
@@ -7218,13 +7247,13 @@ mod tests {
             .unwrap()
             .current
             .title = Some("Stale".to_owned());
-        query.0.lock().unwrap().observation = (Some("Fresh".to_owned()), None);
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observation = (Some("Fresh".to_owned()), None);
         let fresh = state.page_digest(&request).unwrap();
         assert!(fresh.contains("Title: Fresh"));
         assert!(!fresh.contains("Title: Stale"));
 
         state.inventory_stale = true;
-        query.0.lock().unwrap().inventory_error = true;
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).inventory_error = true;
         assert!(state.page_digest(&request).is_some());
         assert!(
             state
@@ -7237,13 +7266,13 @@ mod tests {
                 .stale
         );
 
-        query.0.lock().unwrap().inventory_error = false;
-        query.0.lock().unwrap().observation = (Some("blocked".to_owned()), None);
-        let observation_queries = query.0.lock().unwrap().observation_queries;
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).inventory_error = false;
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observation = (Some("blocked".to_owned()), None);
+        let observation_queries = query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observation_queries;
         query
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .modal_targets
             .insert("background".to_owned());
         state
@@ -7257,7 +7286,7 @@ mod tests {
             .status = Some(204);
         let modal = state.page_digest(&request).unwrap();
         assert_eq!(
-            query.0.lock().unwrap().observation_queries,
+            query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observation_queries,
             observation_queries
         );
         assert!(modal.contains("Status: 204"));
@@ -7279,7 +7308,7 @@ mod tests {
         let first = state.add_page_digest(BrowserOutput::Text("first".to_owned()), &request);
         assert!(output_text(&first).contains("URL: https://example.test/before"));
 
-        query.0.lock().unwrap().active =
+        query.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).active =
             Some(("active".to_owned(), "https://example.test/after".to_owned()));
         let screenshot = state.add_page_digest(
             BrowserOutput::Image {
@@ -7407,7 +7436,7 @@ mod tests {
         let mut state = BrowserState::new(BrowserStartup::Local, config);
         let _lifecycle_tx = install_lifecycle_subscription(&mut state);
         let registration = ReceiverRegistrationSeam::new("active", "https://example.test/active");
-        *registration.events.lock().unwrap() = Some(Box::new(event_rx));
+        *registration.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(event_rx));
         state.register_page(&registration).unwrap();
         state.active_target_id = Some("active".to_owned());
         event_tx.send(PageEvent::Closed).unwrap();
@@ -7504,7 +7533,7 @@ mod tests {
         let mut state = BrowserState::new(BrowserStartup::Local, config);
         let lifecycle_sender = install_lifecycle_subscription(&mut state);
         let registration = ReceiverRegistrationSeam::new("page", "https://example.test/start");
-        *registration.details.lock().unwrap() = Some(Box::new(NavigationDetailReceiverSeam {
+        *registration.details.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(NavigationDetailReceiverSeam {
             receiver: rx,
             latest_sequence: Arc::clone(&latest_sequence),
             dropped_count: Arc::clone(&dropped_count),
@@ -7788,7 +7817,7 @@ mod tests {
             let mut state = BrowserState {
                 config,
                 snapshot_evaluator: Some(Box::new(move |script, _input| {
-                    *capture.lock().unwrap() = Some(script);
+                    *capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(script);
                     Ok(json!({ "outline": "captured", "nextRef": 1, "refs": [] }))
                 })),
                 ..BrowserState::default()
@@ -7812,7 +7841,7 @@ mod tests {
                 .expect("capturing page evaluator should return its fixture value");
             assert_eq!(value["outline"], "captured");
             assert_eq!(start_ref, 1);
-            assert_eq!(*captured.lock().unwrap(), Some(expected));
+            assert_eq!(*captured.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), Some(expected));
         }
     }
 
@@ -8868,7 +8897,7 @@ mod tests {
             eprintln!("skipping actor cancellation test: Chromium executable unavailable");
             return None;
         }
-        let actor = Arc::new(BrowserActor::spawn());
+        let actor = Arc::new(BrowserActor::spawn().expect("spawn browser actor"));
         actor
             .execute_with_timeout(
                 request_id(0),
@@ -8891,7 +8920,7 @@ mod tests {
                     .shared
                     .queue
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .in_flight
                     .as_ref()
                     .is_some_and(|in_flight| &in_flight.request_id == id)
@@ -9348,7 +9377,7 @@ mod tests {
         let proxy = StallingCdpProxy::start(&owner.ws_endpoint());
         let actor = BrowserActor::spawn_with_startup(BrowserStartup::Remote(
             ConnectOptions::new(proxy.endpoint()).timeout(Duration::from_secs(10)),
-        ));
+        )).expect("spawn browser actor");
         let started = Instant::now();
         let result = actor
             .execute_with_timeout(
@@ -9401,7 +9430,7 @@ mod tests {
             eprintln!("skipping cold-start deadline test: Chromium executable unavailable");
             return;
         }
-        let actor = BrowserActor::spawn();
+        let actor = BrowserActor::spawn().expect("spawn browser actor");
         let result = actor
             .execute_with_timeout(
                 request_id(25),

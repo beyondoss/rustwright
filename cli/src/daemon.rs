@@ -77,16 +77,15 @@ pub fn ensure_daemon(session: &str, launch: LaunchConfig) -> Result<DaemonConnec
     let state_dir = state_path
         .parent()
         .ok_or_else(|| anyhow!("invalid daemon state path"))?;
-    fs::create_dir_all(state_dir).context("failed to create daemon state directory")?;
-    secure_directory(state_dir)?;
-    let startup_lock = OpenOptions::new()
+    ensure_secure_directory(state_dir).context("failed to create daemon state directory")?;
+    let mut lock_options = OpenOptions::new();
+    lock_options
         .create(true)
         .truncate(false)
         .read(true)
-        .write(true)
-        .open(state_dir.join(format!("{session}.lock")))
+        .write(true);
+    let startup_lock = open_secure_file(&state_dir.join(format!("{session}.lock")), lock_options)
         .context("failed to open daemon startup lock")?;
-    secure_file(&state_dir.join(format!("{session}.lock")))?;
     startup_lock
         .lock_exclusive()
         .context("failed to lock daemon startup")?;
@@ -110,10 +109,9 @@ pub fn ensure_daemon(session: &str, launch: LaunchConfig) -> Result<DaemonConnec
     let token = Uuid::new_v4().simple().to_string();
     let current_exe = std::env::current_exe().context("failed to locate rustwright-cli")?;
 
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state_dir.join(format!("{session}.log")))
+    let mut log_options = OpenOptions::new();
+    log_options.create(true).append(true);
+    let log = open_secure_file(&state_dir.join(format!("{session}.log")), log_options)
         .context("failed to open daemon log")?;
     let stderr = log.try_clone().context("failed to clone daemon log")?;
 
@@ -230,7 +228,7 @@ pub fn run_daemon(session_name: &str, token: String, launch: LaunchConfig) -> Re
     };
     write_state(&path, &state)?;
 
-    let mut browser = BrowserSession::new(launch);
+    let mut browser = BrowserSession::new(launch)?;
     for stream in listener.incoming() {
         let response_and_shutdown = match stream {
             Ok(stream) => handle_connection(stream, &token, &mut browser),
@@ -358,12 +356,12 @@ fn write_state(path: &Path, state: &DaemonState) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid daemon state path"))?;
-    fs::create_dir_all(parent)?;
-    secure_directory(parent)?;
+    ensure_secure_directory(parent)?;
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let file = File::create(&temporary)?;
+    let mut file_options = OpenOptions::new();
+    file_options.write(true).create(true).truncate(true);
+    let file = open_secure_file(&temporary, file_options)?;
     serde_json::to_writer(file, state)?;
-    secure_file(&temporary)?;
     fs::rename(temporary, path)?;
     Ok(())
 }
@@ -421,33 +419,66 @@ fn validate_session_name(session: &str) -> Result<()> {
     Ok(())
 }
 
+/// Create `path` (and missing parents) with mode `0o700`, or harden an existing
+/// directory in place. Modes are applied at creation time so a newly created
+/// state directory is never briefly world-accessible under a permissive umask.
+fn ensure_secure_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        return secure_existing_directory(path);
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            ensure_secure_directory(parent)?;
+        }
+    }
+    create_secure_directory(path)
+}
+
 #[cfg(unix)]
-fn secure_directory(path: &Path) -> Result<()> {
+fn create_secure_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            secure_existing_directory(path)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_secure_directory(path: &Path) -> Result<()> {
+    fs::create_dir(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_existing_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn secure_directory(_path: &Path) -> Result<()> {
+fn secure_existing_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn secure_file(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn secure_file(_path: &Path) -> Result<()> {
-    Ok(())
+/// Open/create a file with mode `0o600` so session tokens and logs are never
+/// briefly created with the process umask defaults.
+fn open_secure_file(path: &Path, mut options: OpenOptions) -> Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
     use std::net::TcpListener;
 
     use super::*;
@@ -486,7 +517,7 @@ mod tests {
             response
         });
         let (stream, _) = listener.accept().unwrap();
-        let mut browser = BrowserSession::new(LaunchConfig::default());
+        let mut browser = BrowserSession::new(LaunchConfig::default()).unwrap();
         assert!(!handle_connection(stream, "unused", &mut browser).unwrap());
         let response: CommandResponse = serde_json::from_str(&client.join().unwrap()).unwrap();
         assert!(!response.success);

@@ -288,7 +288,7 @@ impl CloseLifecycle {
     }
 
     fn start(&self) -> CloseStart {
-        let mut phase = self.phase.lock().unwrap();
+        let mut phase = self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match &*phase {
             ClosePhase::Open => {
                 let (sender, _) = watch::channel(None);
@@ -308,7 +308,7 @@ impl CloseLifecycle {
     ) {
         let outcome = CloseOutcome::from_result(result);
         {
-            let mut phase = self.phase.lock().unwrap();
+            let mut phase = self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if result.is_ok() || close_on_error {
                 *phase = ClosePhase::Closed(outcome.clone());
             } else {
@@ -319,11 +319,11 @@ impl CloseLifecycle {
     }
 
     fn is_closed(&self) -> bool {
-        matches!(*self.phase.lock().unwrap(), ClosePhase::Closed(_))
+        matches!(*self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), ClosePhase::Closed(_))
     }
 
     fn is_closing_or_closed(&self) -> bool {
-        !matches!(*self.phase.lock().unwrap(), ClosePhase::Open)
+        !matches!(*self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), ClosePhase::Open)
     }
 }
 
@@ -428,17 +428,17 @@ impl PendingCommandGuard {
 impl Drop for PendingCommandGuard {
     fn drop(&mut self) {
         let Some(_retention_guard) = self.retention_gate.lock_for_write() else {
-            self.pending.lock().unwrap().remove(&self.id);
-            self.outstanding.lock().unwrap().remove(&self.id);
+            self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.id);
+            self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.id);
             return;
         };
-        let was_pending = self.pending.lock().unwrap().remove(&self.id).is_some();
-        let outstanding = self.outstanding.lock().unwrap().remove(&self.id);
+        let was_pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.id).is_some();
+        let outstanding = self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.id);
         if was_pending {
             if let Some(outstanding) = outstanding {
                 self.traffic_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .push(outstanding.traffic_entry("abandoned-without-response"));
             }
         }
@@ -502,6 +502,9 @@ fn fill_action_dispatch_random(bytes: &mut [u8]) -> RwResult<()> {
     const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
     let buffer_len = u32::try_from(bytes.len())
         .map_err(|_| RwError::Message("action dispatch token buffer is too large".to_string()))?;
+    // SAFETY: `bytes` is a valid mutable buffer of `buffer_len` bytes. Passing a
+    // null algorithm handle with BCRYPT_USE_SYSTEM_PREFERRED_RNG is the documented
+    // BCryptGenRandom contract for system RNG output into that buffer.
     let status = unsafe {
         bcrypt_gen_random(
             std::ptr::null_mut(),
@@ -2690,7 +2693,7 @@ struct PythonSettlementActivity;
 impl PythonSettlementActivity {
     fn begin() -> Option<Self> {
         let (active, _) = active_python_settlements();
-        let mut active = active.lock().unwrap();
+        let mut active = active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !PYTHON_SETTLEMENTS_ENABLED.load(Ordering::SeqCst) {
             return None;
         }
@@ -2703,7 +2706,7 @@ impl PythonSettlementActivity {
 impl Drop for PythonSettlementActivity {
     fn drop(&mut self) {
         let (active, changed) = active_python_settlements();
-        let mut active = active.lock().unwrap();
+        let mut active = active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *active = active.saturating_sub(1);
         changed.notify_all();
     }
@@ -2719,19 +2722,19 @@ impl PyRustShutdownGate {
     fn __call__(&self, py: Python<'_>) {
         let (active, _) = active_python_settlements();
         {
-            let _active = active.lock().unwrap();
+            let _active = active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             PYTHON_SETTLEMENTS_ENABLED.store(false, Ordering::SeqCst);
         }
         py.detach(|| {
             let (active, changed) = active_python_settlements();
             let deadline = Instant::now() + Duration::from_secs(2);
-            let mut count = active.lock().unwrap();
+            let mut count = active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             while *count > 0 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     break;
                 }
-                let (next, timeout) = changed.wait_timeout(count, remaining).unwrap();
+                let (next, timeout) = changed.wait_timeout(count, remaining).unwrap_or_else(|poisoned| poisoned.into_inner());
                 count = next;
                 if timeout.timed_out() {
                     break;
@@ -2771,7 +2774,7 @@ impl PyRustFutureSettler {
             return Ok(());
         }
         future.call_method1(self.method.as_str(), (self.value.bind(py),))?;
-        if let Some(on_delivered) = self.on_delivered.lock().unwrap().take() {
+        if let Some(on_delivered) = self.on_delivered.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
             on_delivered();
         }
         Ok(())
@@ -5330,8 +5333,8 @@ multiline-compatible = """4.5.6"""
                 native_network_records: Mutex::new(NativeNetworkRecordStore::new(1)),
             }),
         };
-        *page.inner.main_frame_id.lock().unwrap() = Some("main-frame".to_string());
-        page.inner.frame_state.lock().unwrap().record_frame(
+        *page.inner.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("main-frame".to_string());
+        page.inner.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record_frame(
             "main-frame".to_string(),
             None,
             None,
@@ -5583,7 +5586,7 @@ multiline-compatible = """4.5.6"""
                     drop(
                         pending
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .remove(&modifier_down_id)
                             .expect("modifier reply sender"),
                     );
@@ -6181,8 +6184,8 @@ multiline-compatible = """4.5.6"""
                 close_target_on_drop: AtomicBool::new(false),
             }),
         };
-        *page.inner.main_frame_id.lock().unwrap() = Some("main-frame".to_string());
-        page.inner.frame_state.lock().unwrap().record_frame(
+        *page.inner.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("main-frame".to_string());
+        page.inner.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record_frame(
             "main-frame".to_string(),
             None,
             None,
@@ -7091,7 +7094,7 @@ multiline-compatible = """4.5.6"""
         let harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-outer");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -7132,11 +7135,11 @@ multiline-compatible = """4.5.6"""
             }]
         });
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             apply_authoritative_tree_for_test(&mut state, &middle_tree, "session-middle");
         }
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.frame_sessions["middle-frame"], "session-middle");
             assert_eq!(state.frame_sessions["leaf-frame"], "session-middle");
         }
@@ -7163,11 +7166,11 @@ multiline-compatible = """4.5.6"""
             }]
         });
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             apply_authoritative_tree_for_test(&mut state, &outer_tree, "session-outer");
         }
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.frame_sessions["middle-frame"], "session-middle");
             assert_eq!(state.frame_sessions["leaf-frame"], "session-middle");
         }
@@ -7176,13 +7179,13 @@ multiline-compatible = """4.5.6"""
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .detach_session("session-middle");
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             apply_authoritative_tree_for_test(&mut state, &outer_tree, "session-outer");
         }
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.session_frames.contains_key("session-middle"));
         assert_eq!(state.frame_sessions["middle-frame"], "session-outer");
         assert_eq!(state.frame_sessions["leaf-frame"], "session-outer");
@@ -9752,7 +9755,7 @@ multiline-compatible = """4.5.6"""
     fn stale_page_removal_does_not_erase_a_new_attachment_reservation() {
         let registry = AttachedPageRegistry::default();
         let old_lock = Arc::new(tokio::sync::Mutex::new(()));
-        registry.entries.lock().unwrap().insert(
+        registry.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
             "same-target".to_string(),
             AttachedPageEntry {
                 generation: 1,
@@ -9763,7 +9766,7 @@ multiline-compatible = """4.5.6"""
         );
 
         let new_lock = Arc::new(tokio::sync::Mutex::new(()));
-        registry.entries.lock().unwrap().insert(
+        registry.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
             "same-target".to_string(),
             AttachedPageEntry {
                 generation: 2,
@@ -9773,7 +9776,7 @@ multiline-compatible = """4.5.6"""
             },
         );
 
-        let new_page_pointer = registry.entries.lock().unwrap()["same-target"]
+        let new_page_pointer = registry.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner())["same-target"]
             .page
             .as_ptr();
         registry.remove_page("same-target", 1, new_page_pointer);
@@ -9963,17 +9966,17 @@ multiline-compatible = """4.5.6"""
         };
 
         drop(lease);
-        assert_eq!(*cursor_slot.lock().unwrap(), 5);
-        assert_eq!(shared_requests.lock().unwrap().next_applied_seq, 5);
+        assert_eq!(*cursor_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), 5);
+        assert_eq!(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).next_applied_seq, 5);
         assert_eq!(
-            shared_requests.lock().unwrap().requests["request-1"]
+            shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests["request-1"]
                 .current
                 .request["url"],
             "https://example.test/start"
         );
 
-        let receiver = receiver_slot.lock().unwrap().take();
-        let state = state_slot.lock().unwrap().take();
+        let receiver = receiver_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        let state = state_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let committed_lease = PageEventStreamLease {
             receiver,
             state,
@@ -9989,7 +9992,7 @@ multiline-compatible = """4.5.6"""
             page: None,
         };
         {
-            let mut live = shared_requests.lock().unwrap();
+            let mut live = shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let concurrent_request = json!({
                 "url": "https://example.test/concurrent",
                 "method": "POST",
@@ -10018,28 +10021,28 @@ multiline-compatible = """4.5.6"""
             live.applied_order = VecDeque::from([(9, "request-1".to_string())]);
         }
         committed_lease.deliver();
-        assert_eq!(*cursor_slot.lock().unwrap(), 8);
-        assert_eq!(shared_requests.lock().unwrap().next_applied_seq, 10);
+        assert_eq!(*cursor_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), 8);
+        assert_eq!(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).next_applied_seq, 10);
         assert_eq!(
-            shared_requests.lock().unwrap().requests["request-1"]
+            shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests["request-1"]
                 .current
                 .request["url"],
             "https://example.test/concurrent"
         );
         assert_eq!(
-            shared_requests.lock().unwrap().requests["request-1"]
+            shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests["request-1"]
                 .current
                 .request["method"],
             "POST"
         );
         assert_eq!(
-            shared_requests.lock().unwrap().requests["request-1"]
+            shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests["request-1"]
                 .current
                 .request["headers"]["x-concurrent"],
             "preserved"
         );
         assert_eq!(
-            shared_requests.lock().unwrap().requests["request-1"]
+            shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests["request-1"]
                 .current
                 .request["redirected_from"]["url"],
             "https://example.test/start"
@@ -10091,7 +10094,7 @@ multiline-compatible = """4.5.6"""
         page.release_memory_buffers();
         drop(lease);
 
-        assert!(shared_requests.lock().unwrap().requests.is_empty());
+        assert!(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests.is_empty());
     }
 
     #[cfg(feature = "python")]
@@ -10148,7 +10151,7 @@ multiline-compatible = """4.5.6"""
         );
 
         assert_eq!(result, Err(1));
-        let requests = requests.lock().unwrap();
+        let requests = requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(requests.next_applied_seq, 3);
         assert!(requests.requests.is_empty());
         assert!(requests.applied_order.is_empty());
@@ -10183,7 +10186,7 @@ multiline-compatible = """4.5.6"""
         }
 
         let shared_requests = Arc::new(Mutex::new(store("https://example.test/stale", 8)));
-        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap().clone()));
+        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()));
         let (_sender, receiver) = broadcast::channel(4);
         let receiver_slot = Arc::new(Mutex::new(None));
         let state_slot = Arc::new(Mutex::new(None));
@@ -10203,10 +10206,10 @@ multiline-compatible = """4.5.6"""
             page: None,
         };
 
-        shared_requests.lock().unwrap().reset_after_overflow(20);
+        shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reset_after_overflow(20);
         lease.deliver();
 
-        let requests = shared_requests.lock().unwrap();
+        let requests = shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(requests.next_applied_seq, 20);
         assert!(requests.requests.is_empty());
         assert!(requests.applied_order.is_empty());
@@ -10318,9 +10321,9 @@ multiline-compatible = """4.5.6"""
         }
 
         let shared_requests = Arc::new(Mutex::new(NetworkRequestStore::new(7_999)));
-        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap().clone()));
+        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()));
         {
-            let mut working = working_requests.lock().unwrap();
+            let mut working = working_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let stale = request_event(
                 "https://example.test/stale",
                 "STALE",
@@ -10370,11 +10373,11 @@ multiline-compatible = """4.5.6"""
             page: None,
         };
 
-        shared_requests.lock().unwrap().reset_after_overflow(8_000);
+        shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reset_after_overflow(8_000);
         lease.deliver();
 
         {
-            let requests = shared_requests.lock().unwrap();
+            let requests = shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let entry = &requests.requests["request-1"];
             assert!(!entry.applied_by_seq.contains_key(&7_999));
             assert!(entry.applied_by_seq.contains_key(&8_999));
@@ -10439,9 +10442,9 @@ multiline-compatible = """4.5.6"""
         }
 
         let shared_requests = Arc::new(Mutex::new(NetworkRequestStore::new(7_999)));
-        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap().clone()));
+        let working_requests = Arc::new(Mutex::new(shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()));
         {
-            let mut working = working_requests.lock().unwrap();
+            let mut working = working_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let initial = request_event("https://example.test/pre-reset", false);
             let redirect = request_event("https://example.test/post-reset", true);
             apply_network_request_mutation(7_999, &initial, "page-session", &mut working, true)
@@ -10467,10 +10470,10 @@ multiline-compatible = """4.5.6"""
             page: None,
         };
 
-        shared_requests.lock().unwrap().reset_after_overflow(8_000);
+        shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reset_after_overflow(8_000);
         lease.deliver();
 
-        let requests = shared_requests.lock().unwrap();
+        let requests = shared_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let entry = &requests.requests["request-1"];
         assert!(!entry.applied_by_seq.contains_key(&7_999));
         assert!(entry.applied_by_seq.contains_key(&9_000));
@@ -10543,7 +10546,7 @@ multiline-compatible = """4.5.6"""
         let mut batch = Vec::new();
         append_ready_page_events(&mut batch, &mut state, 64);
         assert_eq!(batch[0]["kind"], "request");
-        assert!(requests.lock().unwrap().requests.contains_key("request-1"));
+        assert!(requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests.contains_key("request-1"));
 
         process_page_observation_event(
             2,
@@ -10607,7 +10610,7 @@ multiline-compatible = """4.5.6"""
         assert_eq!(
             event_log
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .console_replay_cutoff("child-session"),
             Some(u64::MAX)
         );
@@ -10626,7 +10629,7 @@ multiline-compatible = """4.5.6"""
         }));
         let attach = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .unwrap()
@@ -10642,7 +10645,7 @@ multiline-compatible = """4.5.6"""
         }));
         let console = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .unwrap()
@@ -10678,7 +10681,7 @@ multiline-compatible = """4.5.6"""
         assert_eq!(
             event_log
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .console_replay_cutoff("child-session"),
             Some(cursor)
         );
@@ -10708,7 +10711,7 @@ multiline-compatible = """4.5.6"""
         assert_eq!(
             event_log
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .console_replay_cutoff("child-session"),
             Some(u64::MAX)
         );
@@ -10728,7 +10731,7 @@ multiline-compatible = """4.5.6"""
         assert!(capture.await.unwrap().is_err());
         let canceled_cutoff = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .console_replay_cutoff("child-session")
             .expect("failed capture must retain a finite cancellation cutoff");
         assert_ne!(canceled_cutoff, u64::MAX);
@@ -10795,7 +10798,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::clone(&harness.event_log);
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .set_worker_event_interest(true);
         harness.emit(json!({
             "sessionId": "page-session",
@@ -10810,7 +10813,7 @@ multiline-compatible = """4.5.6"""
         }));
         let attached = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .unwrap()
@@ -10820,13 +10823,13 @@ multiline-compatible = """4.5.6"""
         assert!(page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_resume_handoff_pending("worker-session"));
         assert_eq!(
             page_worker_session_from_attachment(&page, &attached),
             Some("worker-session".to_string())
         );
-        let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+        let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
 
         let first_resume_page = Arc::clone(&page);
         let first_resume = tokio::spawn(async move {
@@ -10841,7 +10844,7 @@ multiline-compatible = """4.5.6"""
         assert!(page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_resume_handoff_pending("worker-session"));
 
         let mut watchdog = Box::pin(worker_resume_watchdog_step(
@@ -10859,7 +10862,7 @@ multiline-compatible = """4.5.6"""
         assert!(!page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_resume_handoff_pending("worker-session"));
 
         harness.emit(json!({
@@ -10875,7 +10878,7 @@ multiline-compatible = """4.5.6"""
         }));
         let second_attached = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .unwrap()
@@ -10886,7 +10889,7 @@ multiline-compatible = """4.5.6"""
             page_worker_session_from_attachment(&page, &second_attached),
             Some("worker-session-claimed".to_string())
         );
-        let mut claimed_updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+        let mut claimed_updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
         assert!(
             worker_resume_watchdog_step(
                 &page,
@@ -10921,7 +10924,7 @@ multiline-compatible = """4.5.6"""
         let mut harness = navigation_test_harness(16);
         let page = Arc::clone(&harness.page);
         {
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.set_worker_event_interest(true);
         }
         harness.emit(json!({
@@ -10938,7 +10941,7 @@ multiline-compatible = """4.5.6"""
         let attached = harness
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .unwrap()
@@ -10948,7 +10951,7 @@ multiline-compatible = """4.5.6"""
         assert!(page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_resume_handoff_pending("worker-session"));
 
         page.target_closed.store(true, Ordering::SeqCst);
@@ -10956,9 +10959,9 @@ multiline-compatible = """4.5.6"""
         assert!(!page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_resume_handoff_pending("worker-session"));
-        let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+        let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
         assert!(
             !worker_resume_watchdog_step(&page, "worker-session", &mut updates, Duration::ZERO,)
                 .await
@@ -10998,17 +11001,17 @@ multiline-compatible = """4.5.6"""
             .expect("lifecycle consumer must reach the setup barrier")
             .expect("lifecycle barrier sender must remain connected");
         assert!(*entered.borrow());
-        assert_eq!(event_log.lock().unwrap().cursor(), 1);
+        assert_eq!(event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor(), 1);
         assert!(
             !page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .owns_session("child-session"),
             "the lifecycle consumer must still be paused at the barrier"
         );
 
-        let child_cursor = event_log.lock().unwrap().cursor();
+        let child_cursor = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor();
         let (mut events, mut cursor, mut state) =
             PageEventStreamState::subscribe_page_event_stream(&page);
         assert_eq!(cursor, child_cursor);
@@ -11019,7 +11022,7 @@ multiline-compatible = """4.5.6"""
             .await
             .expect("lifecycle consumer must leave the setup barrier")
             .expect("lifecycle completion sender must remain connected");
-        let lifecycle_tail = harness.event_log.lock().unwrap().cursor();
+        let lifecycle_tail = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor();
         harness.emit(json!({
             "method": "Test.lifecycle-barrier-released",
             "params": {}
@@ -11272,7 +11275,7 @@ multiline-compatible = """4.5.6"""
                 .client
                 .runtime_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .observe_event(event);
         }
         async fn reply_action_dispatch_binding(&mut self, expected_session_id: &str) {
@@ -11373,8 +11376,8 @@ multiline-compatible = """4.5.6"""
     }
 
     fn warm_main_frame_cache(page: &Arc<PageInner>) {
-        *page.main_frame_id.lock().unwrap() = Some("main-frame".to_string());
-        let mut state = page.frame_state.lock().unwrap();
+        *page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("main-frame".to_string());
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.mark_frame_event_listener_registered();
         state.mark_page_domain_enabled("page-session");
         state.record_frame_loader("main-frame", Some("loader-main"));
@@ -11394,7 +11397,7 @@ multiline-compatible = """4.5.6"""
     fn navigation_observation_snapshot(
         page: &PageInner,
     ) -> (u64, u64, Option<String>, usize, u64, usize) {
-        let network = page.native_network_records.lock().unwrap();
+        let network = page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let network_snapshot = (
             network.navigation_epoch,
             network.navigation_start_index,
@@ -11402,7 +11405,7 @@ multiline-compatible = """4.5.6"""
             network.records.len(),
         );
         drop(network);
-        let console = page.console_records.lock().unwrap();
+        let console = page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         (
             network_snapshot.0,
             network_snapshot.1,
@@ -11419,7 +11422,7 @@ multiline-compatible = """4.5.6"""
                 let watermark = page
                     .navigation_transition_lock
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .contiguous_event_watermark;
                 if expected_cursor == 0
                     || watermark
@@ -11469,7 +11472,7 @@ multiline-compatible = """4.5.6"""
         let mut harness = navigation_test_harness(16);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-b");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -11596,7 +11599,7 @@ return this.dataset.mainWorldOverride === "observed";
     async fn unsubscribed_or_page_disabled_frame_cache_remains_cold() {
         let mut harness = navigation_test_harness(8);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 "main-frame".to_string(),
                 None,
@@ -11753,7 +11756,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.cache_execution_context("main-frame", "page-session", json!(11),));
         }
         harness.emit(json!({
@@ -11811,7 +11814,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(result_page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .cached_execution_context("main-frame", "page-session")
             .is_none());
     }
@@ -11826,7 +11829,7 @@ return this.dataset.mainWorldOverride === "observed";
             .requested
             .store(true, Ordering::SeqCst);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -11849,7 +11852,7 @@ return this.dataset.mainWorldOverride === "observed";
             "params": {}
         }));
         reconcile_frame_cache_invalidations(&harness.page);
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state
             .cached_execution_context("main-frame", "page-session")
             .is_none());
@@ -11863,7 +11866,7 @@ return this.dataset.mainWorldOverride === "observed";
         let harness = navigation_test_harness(16);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.cache_execution_context("main-frame", "page-session", json!(11)));
         }
 
@@ -11880,7 +11883,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         reconcile_frame_cache_invalidations(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .cached_execution_context("main-frame", "page-session")
                 .is_none());
@@ -11895,7 +11898,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         reconcile_frame_cache_invalidations(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .cached_execution_context("main-frame", "page-session")
                 .is_none());
@@ -11916,7 +11919,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         reconcile_frame_cache_invalidations(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .cached_execution_context("child-frame", "page-session")
                 .is_none());
@@ -11945,7 +11948,7 @@ return this.dataset.mainWorldOverride === "observed";
             "params": {"sessionId": "session-a", "targetId": "outer-frame"}
         }));
         reconcile_frame_cache_invalidations(&harness.page);
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state
             .cached_execution_context("outer-frame", "session-a")
             .is_none());
@@ -11961,7 +11964,7 @@ return this.dataset.mainWorldOverride === "observed";
         start_page_frame_cache_tracking(&harness.page, event_cursor, "page-session");
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.cache_execution_context("main-frame", "page-session", json!(11)));
         }
 
@@ -12002,7 +12005,7 @@ return this.dataset.mainWorldOverride === "observed";
                     if page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .cached_execution_context("main-frame", "page-session")
                         .is_none()
                     {
@@ -12024,7 +12027,7 @@ return this.dataset.mainWorldOverride === "observed";
             .await
             .expect("destroyed context must not affect the main-world action");
             {
-                let mut state = page.frame_state.lock().unwrap();
+                let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 assert!(state
                     .cached_execution_context("main-frame", "page-session")
                     .is_none());
@@ -12046,7 +12049,7 @@ return this.dataset.mainWorldOverride === "observed";
                     if page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .cached_execution_context("main-frame", "page-session")
                         .is_none()
                     {
@@ -12070,7 +12073,7 @@ return this.dataset.mainWorldOverride === "observed";
             assert!(page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .cached_execution_context("main-frame", "page-session")
                 .is_none());
             (first, second)
@@ -12156,7 +12159,7 @@ return this.dataset.mainWorldOverride === "observed";
             }
         }
         {
-            let records = harness.page.console_records.lock().unwrap();
+            let records = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(records.records.is_empty());
             assert!(records.evictions_by_epoch.is_empty());
             assert_eq!(records.evictions_total, 0);
@@ -12168,7 +12171,7 @@ return this.dataset.mainWorldOverride === "observed";
             .requested
             .store(true, Ordering::SeqCst);
         record_page_observation_event(&harness.page, &console_event);
-        let records = harness.page.console_records.lock().unwrap();
+        let records = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(records.records.len(), 1);
         assert!(records.evictions_by_epoch.is_empty());
         assert_eq!(
@@ -12188,7 +12191,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         let resolution = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-b");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -12235,7 +12238,7 @@ return this.dataset.mainWorldOverride === "observed";
             json!(42)
         );
 
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.session_frames["session-b"], "outer-frame");
         assert_eq!(state.frame_sessions["child-frame"], "session-b");
         assert_eq!(
@@ -12533,7 +12536,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .locator_resolution_reresolve_count,
             2
         );
@@ -12544,7 +12547,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         let refresh_lock = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.mark_frame_cache_dirty("page-session");
             Arc::clone(&state.frame_tree_refresh_lock)
         };
@@ -12577,7 +12580,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-b");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -12610,7 +12613,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_session_errors
             .get("outer-frame")
             .is_none());
@@ -12658,7 +12661,7 @@ return this.dataset.mainWorldOverride === "observed";
     async fn detached_oopif_setup_completion_does_not_resurrect_cache_metadata() {
         let mut harness = navigation_test_harness(8);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -12687,7 +12690,7 @@ return this.dataset.mainWorldOverride === "observed";
                 assert_eq!(command["sessionId"], "session-a");
                 commands.push(command);
             }
-            page.frame_state.lock().unwrap().detach_session("session-a");
+            page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).detach_session("session-a");
             for command in &commands {
                 harness.reply(command, json!({}));
             }
@@ -12700,7 +12703,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await
         .expect("detached setup must finish");
         result.expect("late setup completion is ignored");
-        let mut state = assertion_page.frame_state.lock().unwrap();
+        let mut state = assertion_page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // The spawned wrapper performs this final step after setup returns.
         // Its ownership guard must also reject the stale completion.
         state.mark_iframe_session_ready_for_session("outer-frame", "session-a");
@@ -12717,7 +12720,7 @@ return this.dataset.mainWorldOverride === "observed";
         start_page_frame_cache_tracking_without_listener(&harness.page, 0, "page-session");
         warm_main_frame_cache(&harness.page);
         let generation = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -12791,7 +12794,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("refresh interleaving must finish");
         refresh_result.expect("stale response is rejected without surfacing an error");
         let replacement_generation = {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(
                 state.frame_sessions.get("outer-frame").map(String::as_str),
                 Some("session-b")
@@ -12838,7 +12841,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await
         .expect("replacement publication must finish");
         replacement_result.expect("replacement tree must publish");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.frame_sessions["outer-frame"], "session-b");
         assert_eq!(state.frame_sessions["b-child"], "session-b");
         assert_eq!(state.frames["outer-frame"].url, "https://b.test/");
@@ -12851,7 +12854,7 @@ return this.dataset.mainWorldOverride === "observed";
         start_page_frame_cache_tracking_without_listener(&harness.page, 0, "page-session");
         warm_main_frame_cache(&harness.page);
         let generation = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.mark_frame_cache_dirty("page-session");
             state
                 .frame_cache_refresh_generation("page-session")
@@ -12902,7 +12905,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("same-document refresh interleaving must finish");
         refresh_result.expect("stale response is rejected without surfacing an error");
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.frames["main-frame"].url, "https://example.test/#new");
         assert!(!state.frames.contains_key("stale-child"));
         let refreshed_generation = state
@@ -12961,7 +12964,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         let (stale_pin, mut waiter_updates) = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 "stale-frame".to_string(),
                 Some("main-frame".to_string()),
@@ -12984,7 +12987,7 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
                 stale_pin.generation,
                 IframeSetupTaskEntry {
@@ -12997,7 +13000,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_cache_refresh_generation("page-session")
             .expect("dirty main-session cache generation");
         let refresh_page = Arc::clone(&harness.page);
@@ -13032,7 +13035,7 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&stale_pin.generation));
         assert!(stale_setup
             .await
@@ -13042,7 +13045,7 @@ return this.dataset.mainWorldOverride === "observed";
             .await
             .expect("authoritative ownership change must notify pinned waiters")
             .expect("session update channel");
-        let mut state = harness.page.frame_state.lock().unwrap();
+        let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("stale-frame"));
         assert!(!state.frame_sessions.contains_key("stale-frame"));
         state.unregister_frame_session_waiter("stale-frame", stale_pin.generation);
@@ -13096,7 +13099,7 @@ return this.dataset.mainWorldOverride === "observed";
                     let generation = refresh_page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .frame_tree_generations
                         .get("page-session")
                         .copied()
@@ -13142,7 +13145,7 @@ return this.dataset.mainWorldOverride === "observed";
             .browser
             .stealth_user_agent_override
             .lock()
-            .unwrap() = Some(Value::Null);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Value::Null);
 
         let registration_page = Arc::clone(&harness.page);
         let resolution_page = Arc::clone(&harness.page);
@@ -13160,13 +13163,13 @@ return this.dataset.mainWorldOverride === "observed";
             let mut updates = resolution_page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .subscribe_session_updates();
             loop {
                 if resolution_page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .iframe_sessions_ready
                     .contains("session-b")
                 {
@@ -13277,7 +13280,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("retrying pre-arm and locator must finish");
         let resolution = resolution.expect("later locator must recover after pre-arm retry");
         assert_eq!(resolution.session_id, "session-b");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.iframe_sessions_armed.contains("session-b"));
         assert!(state.iframe_sessions_ready.contains("session-b"));
         assert!(state.frame_session_errors.get("outer-frame").is_none());
@@ -13301,12 +13304,12 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("registration dispatch");
 
         let wait_for_error = async {
-            let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+            let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
             loop {
                 if page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_session_errors
                     .contains_key("outer-frame")
                 {
@@ -13330,7 +13333,7 @@ return this.dataset.mainWorldOverride === "observed";
             .expect_err("second timeout must be authoritative")
             .to_string();
         assert!(error.contains("timed out"), "{error}");
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.iframe_sessions_armed.contains("session-b"));
         assert!(!state.iframe_sessions_ready.contains("session-b"));
         assert!(harness.write_rx.try_recv().is_err());
@@ -13353,12 +13356,12 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("registration dispatch");
 
         let wait_for_error = async {
-            let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+            let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
             loop {
                 if page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_session_errors
                     .contains_key("outer-frame")
                 {
@@ -13478,7 +13481,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "parentFrameId": "main-frame"
             }
         }));
-        let attached_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let attached_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Page.frameNavigated",
@@ -13492,7 +13495,7 @@ return this.dataset.mainWorldOverride === "observed";
                 }
             }
         }));
-        let navigated_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let navigated_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Page.frameDetached",
@@ -13501,10 +13504,10 @@ return this.dataset.mainWorldOverride === "observed";
                 "reason": "remove"
             }
         }));
-        let detached_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let detached_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
 
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(
                 state.mark_frame_cache_dirty_at_sequence("page-session", Some(attached_sequence))
             );
@@ -13534,7 +13537,7 @@ return this.dataset.mainWorldOverride === "observed";
 
         reconcile_frame_cache_invalidations(&harness.page);
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("child-frame"));
         assert!(!state.frame_sessions.contains_key("child-frame"));
         assert!(!state.frame_loader_ids.contains_key("child-frame"));
@@ -13568,13 +13571,13 @@ return this.dataset.mainWorldOverride === "observed";
                 "waitingForDebugger": false
             }
         }));
-        let attached_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let attached_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Target.detachedFromTarget",
             "params": {"sessionId": "session-b"}
         }));
-        let detached_session_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let detached_session_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Page.frameDetached",
@@ -13583,7 +13586,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "reason": "remove"
             }
         }));
-        let detached_frame_sequence = harness.event_log.lock().unwrap().cursor() - 1;
+        let detached_frame_sequence = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor() - 1;
         assert_eq!(
             (
                 attached_sequence,
@@ -13595,7 +13598,7 @@ return this.dataset.mainWorldOverride === "observed";
         let stale_attached_event = harness
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(attached_sequence)
             .into_iter()
             .next()
@@ -13603,7 +13606,7 @@ return this.dataset.mainWorldOverride === "observed";
             .1;
 
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(
                 state.mark_frame_cache_dirty_at_sequence("page-session", Some(attached_sequence))
             );
@@ -13627,9 +13630,9 @@ return this.dataset.mainWorldOverride === "observed";
         }
 
         let reconciliation = {
-            let event_log = harness.event_log.lock().unwrap();
-            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap();
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let event_log = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             reconcile_frame_cache_invalidations_locked(
                 &mut state,
                 &mut main_frame_id,
@@ -13648,7 +13651,7 @@ return this.dataset.mainWorldOverride === "observed";
         handle_page_oopif_event(Arc::clone(&harness.page), stale_attached_event).await;
         tokio::task::yield_now().await;
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("outer-frame"));
         assert!(!state.frame_sessions.contains_key("outer-frame"));
         assert!(!state.session_frames.contains_key("session-b"));
@@ -13690,7 +13693,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .console_replay_until_event_cursor
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(worker_session.to_string(), 11);
 
         handle_page_oopif_event(
@@ -13705,7 +13708,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await;
         handle_page_oopif_event(Arc::clone(&harness.page), attach).await;
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.owns_worker_session(worker_session));
         drop(state);
         assert!(!harness
@@ -13719,7 +13722,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .console_replay_until_event_cursor
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(worker_session));
     }
 
@@ -13727,7 +13730,7 @@ return this.dataset.mainWorldOverride === "observed";
     async fn console_capture_multi_session_setup_uses_remaining_deadline() {
         let mut harness = navigation_test_harness(8);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("iframe-frame", "iframe-session");
             state
                 .iframe_sessions_ready
@@ -13767,7 +13770,7 @@ return this.dataset.mainWorldOverride === "observed";
     async fn sequence_gate_live_iframe_attachments_without_parent_mapping_are_noops() {
         let mut harness = navigation_test_harness(16);
         warm_main_frame_cache(&harness.page);
-        harness.page.frame_state.lock().unwrap().record_frame(
+        harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record_frame(
             "removed-parent".to_string(),
             Some("main-frame".to_string()),
             None,
@@ -13807,7 +13810,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frames
             .contains_key("removed-parent"));
         handle_page_oopif_event(Arc::clone(&harness.page), stale_removed_parent_attachment).await;
@@ -13842,7 +13845,7 @@ return this.dataset.mainWorldOverride === "observed";
         handle_page_oopif_event(Arc::clone(&harness.page), stale_missing_parent_attachment).await;
         tokio::task::yield_now().await;
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (frame_id, session_id) in [
             ("removed-parent-child", "removed-parent-child-session"),
             ("missing-parent-child", "missing-parent-child-session"),
@@ -13929,7 +13932,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "parentFrameId": "main-frame"
             }
         }));
-        let logged_events = harness.event_log.lock().unwrap().entries_since(0);
+        let logged_events = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entries_since(0);
         assert_eq!(logged_events.len(), 7);
         let stale_attached_event = logged_events[0].1.clone();
         let stale_navigated_event = logged_events[2].1.clone();
@@ -13939,13 +13942,13 @@ return this.dataset.mainWorldOverride === "observed";
         harness.page.crashed.store(true, Ordering::SeqCst);
         reconcile_frame_cache_invalidations(&harness.page);
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(!state.frames.contains_key("removed-child"));
             assert!(!state.frames.contains_key("stale-main"));
             assert!(state.frames.contains_key("surviving-child"));
         }
         let network_before = {
-            let network = harness.page.native_network_records.lock().unwrap();
+            let network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 network.navigation_epoch,
                 network.navigation_start_index,
@@ -13956,7 +13959,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .console_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .navigation_epoch;
 
         handle_page_oopif_event(Arc::clone(&harness.page), stale_attached_event).await;
@@ -13965,12 +13968,12 @@ return this.dataset.mainWorldOverride === "observed";
         handle_page_oopif_event(Arc::clone(&harness.page), stale_detached_event).await;
 
         assert_eq!(
-            harness.page.main_frame_id.lock().unwrap().as_deref(),
+            harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref(),
             Some("stale-main")
         );
         assert!(!harness.page.crashed.load(Ordering::SeqCst));
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(!state.frames.contains_key("removed-child"));
             assert!(!state.frames.contains_key("stale-main"));
             assert!(!state.frame_loader_ids.contains_key("stale-main"));
@@ -13981,7 +13984,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .is_some_and(|children| children.iter().any(|child| child == "surviving-child")));
         }
         let network_after_stale = {
-            let network = harness.page.native_network_records.lock().unwrap();
+            let network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 network.navigation_epoch,
                 network.navigation_start_index,
@@ -13994,7 +13997,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .console_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .navigation_epoch,
             console_epoch_before
         );
@@ -14016,7 +14019,7 @@ return this.dataset.mainWorldOverride === "observed";
         )
         .await;
         {
-            let network = harness.page.native_network_records.lock().unwrap();
+            let network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(network.navigation_epoch, network_before.0 + 1);
             assert_eq!(network.navigation_start_index, network_before.1);
             assert_eq!(
@@ -14029,7 +14032,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .console_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .navigation_epoch,
             console_epoch_before + 1
         );
@@ -14048,7 +14051,7 @@ return this.dataset.mainWorldOverride === "observed";
         )
         .await;
         {
-            let network = harness.page.native_network_records.lock().unwrap();
+            let network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(network.navigation_epoch, network_before.0 + 2);
             assert_eq!(network.navigation_start_index, network_before.1);
             assert_eq!(
@@ -14061,7 +14064,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .console_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .navigation_epoch,
             console_epoch_before + 2
         );
@@ -14083,7 +14086,7 @@ return this.dataset.mainWorldOverride === "observed";
         let listener_copy = harness
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .pop()
             .expect("logged same-document navigation")
@@ -14092,7 +14095,7 @@ return this.dataset.mainWorldOverride === "observed";
         reconcile_frame_cache_invalidations(&harness.page);
 
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["main-frame"].url,
             "https://example.test/#replayed"
         );
         let after_reconciliation = navigation_observation_snapshot(&harness.page);
@@ -14111,7 +14114,7 @@ return this.dataset.mainWorldOverride === "observed";
             "the rejected listener copy must not repeat replay side effects"
         );
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["main-frame"].url,
             "https://example.test/#replayed"
         );
     }
@@ -14136,7 +14139,7 @@ return this.dataset.mainWorldOverride === "observed";
         let listener_copy = harness
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .pop()
             .expect("logged recovering navigation")
@@ -14146,11 +14149,11 @@ return this.dataset.mainWorldOverride === "observed";
 
         assert!(!harness.page.crashed.load(Ordering::SeqCst));
         assert_eq!(
-            harness.page.main_frame_id.lock().unwrap().as_deref(),
+            harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref(),
             Some("recovered-main-frame")
         );
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(
                 state.frames["recovered-main-frame"].url,
                 "https://recovered.test/"
@@ -14177,7 +14180,7 @@ return this.dataset.mainWorldOverride === "observed";
         );
         assert!(!harness.page.crashed.load(Ordering::SeqCst));
         assert_eq!(
-            harness.page.main_frame_id.lock().unwrap().as_deref(),
+            harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref(),
             Some("recovered-main-frame")
         );
     }
@@ -14207,7 +14210,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "url": "https://live.test/#fragment"
             }
         }));
-        let listener_copies = harness.event_log.lock().unwrap().entries_since(0);
+        let listener_copies = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entries_since(0);
         assert_eq!(listener_copies.len(), 2);
 
         for (_, listener_copy) in listener_copies {
@@ -14216,11 +14219,11 @@ return this.dataset.mainWorldOverride === "observed";
 
         assert!(!harness.page.crashed.load(Ordering::SeqCst));
         assert_eq!(
-            harness.page.main_frame_id.lock().unwrap().as_deref(),
+            harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref(),
             Some("live-main-frame")
         );
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["live-main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["live-main-frame"].url,
             "https://live.test/#fragment"
         );
         let after_live = navigation_observation_snapshot(&harness.page);
@@ -14239,7 +14242,7 @@ return this.dataset.mainWorldOverride === "observed";
             "reconciliation must not repeat live-consumed side effects"
         );
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["live-main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["live-main-frame"].url,
             "https://live.test/#fragment"
         );
     }
@@ -14271,7 +14274,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await;
 
         let initial_index = {
-            let mut network = harness.page.native_network_records.lock().unwrap();
+            let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(network.navigation_epoch, 1);
             let current = network.read(false, false);
             assert_eq!(current.records.len(), 1);
@@ -14310,7 +14313,7 @@ return this.dataset.mainWorldOverride === "observed";
         )
         .await;
 
-        let mut network = harness.page.native_network_records.lock().unwrap();
+        let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = network.read(false, false);
         assert_eq!(current.records.len(), 1);
         assert_eq!(current.records[0].index, initial_index);
@@ -14386,14 +14389,14 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .console_records
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .records
                     .is_empty();
                 let network_recorded = !harness
                     .page
                     .native_network_records
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .records
                     .is_empty();
                 if console_recorded && network_recorded {
@@ -14406,7 +14409,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("retained console event must reach the lagged listener");
 
         {
-            let network = harness.page.native_network_records.lock().unwrap();
+            let network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(network.navigation_epoch, 1);
             assert_eq!(
                 network.current_loader_id.as_deref(),
@@ -14433,11 +14436,11 @@ return this.dataset.mainWorldOverride === "observed";
                 .all(|entry| entry.record.navigation_epoch == 1));
         }
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["main-frame"].url,
             "https://example.test/after-lag",
             "Page.frameNavigated replay must update the authoritative frame record"
         );
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(console.navigation_epoch, 1);
         let current = console.read(false, false);
         assert_eq!(current.records.len(), 1);
@@ -14497,7 +14500,7 @@ return this.dataset.mainWorldOverride === "observed";
             }
         }));
         assert!(
-            harness.event_log.lock().unwrap().oldest_seq() > 0,
+            harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq() > 0,
             "the navigation must be older than the event-log low-water mark"
         );
 
@@ -14507,7 +14510,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .console_records
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .records
                     .is_empty()
                 {
@@ -14523,10 +14526,10 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .native_network_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .navigation_epoch;
         assert_eq!(network_epoch, 1);
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(console.navigation_epoch, network_epoch);
         let current = console.read(false, false);
         assert_eq!(current.records.len(), 1);
@@ -14572,7 +14575,7 @@ return this.dataset.mainWorldOverride === "observed";
             }));
         }
         assert!(
-            harness.event_log.lock().unwrap().oldest_seq() > lost_navigation_sequence,
+            harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq() > lost_navigation_sequence,
             "the navigation must rotate out before foreground reconciliation"
         );
 
@@ -14620,7 +14623,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert_eq!(after_listener.3, 1);
         assert_eq!(after_listener.5, 1);
 
-        let mut network = harness.page.native_network_records.lock().unwrap();
+        let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current_network = network.read(false, false);
         assert_eq!(current_network.records.len(), 1);
         assert_eq!(
@@ -14629,7 +14632,7 @@ return this.dataset.mainWorldOverride === "observed";
         );
         drop(network);
 
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current_console = console.read(false, false);
         assert_eq!(current_console.records.len(), 1);
         assert_eq!(
@@ -14657,7 +14660,7 @@ return this.dataset.mainWorldOverride === "observed";
             }));
         }
         assert_eq!(
-            harness.event_log.lock().unwrap().oldest_seq(),
+            harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq(),
             start_cursor,
             "the complete listener gap must remain available for replay"
         );
@@ -14721,7 +14724,7 @@ return this.dataset.mainWorldOverride === "observed";
             replay_cursor
         );
 
-        let mut network = harness.page.native_network_records.lock().unwrap();
+        let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let network_batch = network.read(false, false);
         assert_eq!(network_batch.records.len(), 2);
         assert_eq!(
@@ -14737,7 +14740,7 @@ return this.dataset.mainWorldOverride === "observed";
         );
         drop(network);
 
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let console_batch = console.read(false, false);
         assert_eq!(console_batch.records.len(), 2);
         assert_eq!(
@@ -14775,7 +14778,7 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&losing_pin.generation));
 
         harness.emit(json!({
@@ -14786,7 +14789,7 @@ return this.dataset.mainWorldOverride === "observed";
         reconcile_frame_cache_invalidations_after_lag(&harness.page);
 
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let swap = state
                 .frame_swaps
                 .get("swap-frame")
@@ -14805,14 +14808,14 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&losing_pin.generation));
         let withheld_setup_id = withheld_setup["id"].as_u64().unwrap();
         tokio::time::timeout(Duration::from_millis(100), async {
             while harness
                 .pending
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contains_key(&withheld_setup_id)
             {
                 tokio::task::yield_now().await;
@@ -14822,13 +14825,13 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("replayed swap must cancel the pending setup command");
 
         let successor_pin = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.register_frame_session_waiter("swap-frame", losing_pin.generation);
             let successor = state.record_session_for_frame("swap-frame", "successor-session");
             state.mark_iframe_session_ready_for_session("swap-frame", "successor-session");
             successor
         };
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state
             .frame_swaps
             .get("swap-frame")
@@ -14906,7 +14909,7 @@ return this.dataset.mainWorldOverride === "observed";
             wait_for_contiguous_event_watermark(&harness.page, expected_cursor).await;
         }
         assert!(
-            harness.event_log.lock().unwrap().oldest_seq() > initial_cursor,
+            harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq() > initial_cursor,
             "the live-consumed navigation must rotate out of the event log"
         );
         let before_lag = navigation_observation_snapshot(&harness.page);
@@ -14954,7 +14957,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert_eq!(after_lag.3, before_lag.3 + 1);
         assert_eq!(after_lag.5, before_lag.5 + 1);
 
-        let mut network = harness.page.native_network_records.lock().unwrap();
+        let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current_network = network.read(false, false);
         assert_eq!(current_network.records.len(), 2);
         assert!(current_network
@@ -14963,7 +14966,7 @@ return this.dataset.mainWorldOverride === "observed";
             .all(|record| record.navigation_epoch == before_lag.0));
         drop(network);
 
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current_console = console.read(false, false);
         assert_eq!(current_console.records.len(), 2);
         assert!(current_console
@@ -15030,7 +15033,7 @@ return this.dataset.mainWorldOverride === "observed";
             Err(broadcast::error::TryRecvError::Lagged(_))
         ));
         assert!(
-            harness.event_log.lock().unwrap().oldest_seq() > 1,
+            harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq() > 1,
             "the second retained lag must rotate past the stale live-listener cursor"
         );
         reconcile_frame_cache_invalidations_after_lag(&harness.page);
@@ -15071,7 +15074,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .native_network_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .accepted_navigation_epochs
                 .low_water_mark
                 .is_none(),
@@ -15091,7 +15094,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .navigation_transition_lock
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contiguous_event_watermark,
             Some(setup_sequence)
         );
@@ -15105,7 +15108,7 @@ return this.dataset.mainWorldOverride === "observed";
         wait_for_contiguous_event_watermark(&harness.page, live_cursor).await;
 
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["main-frame"].url,
             "https://example.test/during-setup"
         );
         assert_eq!(
@@ -15123,7 +15126,7 @@ return this.dataset.mainWorldOverride === "observed";
         let before = navigation_observation_snapshot(&harness.page);
 
         {
-            let mut event_log = harness.event_log.lock().unwrap();
+            let mut event_log = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let missing_live_event = event_log.push(json!({
                 "sessionId": "page-session",
                 "method": "Page.frameNavigated",
@@ -15145,7 +15148,7 @@ return this.dataset.mainWorldOverride === "observed";
         wait_for_contiguous_event_watermark(&harness.page, live_cursor).await;
 
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frames["main-frame"].url,
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frames["main-frame"].url,
             "https://example.test/from-gap"
         );
         let after = navigation_observation_snapshot(&harness.page);
@@ -15159,7 +15162,7 @@ return this.dataset.mainWorldOverride === "observed";
         let harness = navigation_test_harness(8);
         let before = navigation_observation_snapshot(&harness.page);
         {
-            let mut navigation_transition = harness.page.navigation_transition_lock.lock().unwrap();
+            let mut navigation_transition = harness.page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             navigation_transition.advance_reconciled(11);
             prune_page_navigation_epochs_to_contiguous_progress(
                 &harness.page,
@@ -15246,7 +15249,7 @@ return this.dataset.mainWorldOverride === "observed";
                 }
             }
         }));
-        let events = harness.event_log.lock().unwrap().entries_since(10);
+        let events = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entries_since(10);
         assert_eq!(events[0].0, 10);
         assert_eq!(events[1].0, 11);
 
@@ -15261,14 +15264,14 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .console_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .read(false, false);
         assert!(current.records.is_empty());
         let all = harness
             .page
             .console_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .read(true, false);
         assert_eq!(all.records.len(), 1);
         assert_eq!(all.records[0].text, "document-a");
@@ -15325,7 +15328,7 @@ return this.dataset.mainWorldOverride === "observed";
                 }
             }
         }));
-        let events = harness.event_log.lock().unwrap().entries_since(10);
+        let events = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entries_since(10);
         assert_eq!(events[0].0, 10);
         assert_eq!(events[1].0, 11);
 
@@ -15337,7 +15340,7 @@ return this.dataset.mainWorldOverride === "observed";
 
         handle_page_oopif_event(Arc::clone(&harness.page), events[0].1.clone()).await;
         {
-            let mut network = harness.page.native_network_records.lock().unwrap();
+            let mut network = harness.page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(network.navigation_epoch, after_replay.0);
             assert_eq!(network.current_loader_id.as_deref(), Some("loader-b"));
             assert!(network.read(false, false).records.is_empty());
@@ -15419,7 +15422,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "args": [{"type": "string", "value": "after-c"}]
             }
         }));
-        let events = harness.event_log.lock().unwrap().entries_since(10);
+        let events = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entries_since(10);
         assert_eq!(
             events
                 .iter()
@@ -15432,7 +15435,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .console_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .navigation_epoch;
         reconcile_frame_cache_invalidations(&harness.page);
         assert_eq!(
@@ -15440,7 +15443,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .console_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .navigation_epoch,
             initial_epoch + 2
         );
@@ -15448,7 +15451,7 @@ return this.dataset.mainWorldOverride === "observed";
         for event_index in [0, 2, 4] {
             handle_page_oopif_event(Arc::clone(&harness.page), events[event_index].1.clone()).await;
         }
-        let mut console = harness.page.console_records.lock().unwrap();
+        let mut console = harness.page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let all = console.read(true, false);
         assert_eq!(
             all.records
@@ -15494,7 +15497,7 @@ return this.dataset.mainWorldOverride === "observed";
             .browser
             .stealth_user_agent_override
             .lock()
-            .unwrap() = Some(Value::Null);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Value::Null);
 
         harness.emit(json!({
             "sessionId": "page-session",
@@ -15522,7 +15525,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key("outer-frame")
                 {
@@ -15538,12 +15541,12 @@ return this.dataset.mainWorldOverride === "observed";
         let operations = async move {
             reconcile_frame_cache_invalidations(&page);
             reconcile_frame_cache_invalidations(&page);
-            let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+            let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
             loop {
                 if page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .iframe_sessions_ready
                     .contains("session-b")
                 {
@@ -15654,7 +15657,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("lag recovery and locator resolution must finish");
         let resolution = resolution.expect("locator must use the recovered session");
         assert_eq!(resolution.session_id, "session-b");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.iframe_sessions_armed.contains("session-b"));
         assert!(state.iframe_sessions_ready.contains("session-b"));
         assert!(state.iframe_setup_started.contains("session-b"));
@@ -15681,9 +15684,9 @@ return this.dataset.mainWorldOverride === "observed";
             }
         }));
         let recovered_session = {
-            let log = harness.event_log.lock().unwrap();
-            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap();
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let log = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut reconciliation = reconcile_frame_cache_invalidations_locked(
                 &mut state,
                 &mut main_frame_id,
@@ -15718,7 +15721,7 @@ return this.dataset.mainWorldOverride === "observed";
             "a detached recovered owner must not enter the setup FSM"
         );
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.frame_sessions["outer-frame"], "page-session");
             assert!(!state.iframe_setup_started.contains("session-b"));
             assert!(!state.iframe_sessions_armed.contains("session-b"));
@@ -15751,7 +15754,7 @@ return this.dataset.mainWorldOverride === "observed";
         harness.reply_error(&reattach_prearm, "test stops after normal re-attach begins");
         tokio::task::yield_now().await;
         assert_eq!(
-            harness.page.frame_state.lock().unwrap().frame_sessions["outer-frame"],
+            harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frame_sessions["outer-frame"],
             "session-c"
         );
         assert!(harness.write_rx.try_recv().is_err());
@@ -15767,7 +15770,7 @@ return this.dataset.mainWorldOverride === "observed";
             .browser
             .stealth_user_agent_override
             .lock()
-            .unwrap() = Some(Value::Null);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Value::Null);
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Target.attachedToTarget",
@@ -15783,9 +15786,9 @@ return this.dataset.mainWorldOverride === "observed";
             }
         }));
         let recovered_session = {
-            let log = harness.event_log.lock().unwrap();
-            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap();
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let log = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut main_frame_id = harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut reconciliation = reconcile_frame_cache_invalidations_locked(
                 &mut state,
                 &mut main_frame_id,
@@ -15886,7 +15889,7 @@ return this.dataset.mainWorldOverride === "observed";
             }),
         );
         tokio::task::yield_now().await;
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.frame_sessions["outer-frame"], "session-c");
         assert!(!state.iframe_setup_started.contains("session-b"));
         assert!(!state.iframe_sessions_armed.contains("session-b"));
@@ -15925,7 +15928,7 @@ return this.dataset.mainWorldOverride === "observed";
         harness.reply(&stale_prearm, json!({}));
         tokio::task::yield_now().await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.frame_sessions["outer-frame"], "session-b");
             assert!(!state.iframe_sessions_armed.contains("session-a"));
             assert!(!state.iframe_sessions_ready.contains("session-a"));
@@ -15940,7 +15943,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(8);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -15990,7 +15993,7 @@ return this.dataset.mainWorldOverride === "observed";
             assert_eq!(stale["sessionId"], "session-a");
             harness.reply_error(&stale, "Session with given id not found");
             {
-                let mut state = responder_page.frame_state.lock().unwrap();
+                let mut state = responder_page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.record_session_for_frame("outer-frame", "session-b");
                 state.mark_page_domain_enabled("session-b");
                 state.mark_iframe_session_ready_for_session("outer-frame", "session-b");
@@ -16055,7 +16058,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(16);
         warm_main_frame_cache(&harness.page);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -16149,7 +16152,7 @@ return this.dataset.mainWorldOverride === "observed";
                 }
             }
             {
-                let mut state = responder_page.frame_state.lock().unwrap();
+                let mut state = responder_page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 assert_eq!(
                     state.frame_sessions.get("outer-frame").map(String::as_str),
                     Some("session-b")
@@ -16231,7 +16234,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(16);
         warm_main_frame_cache(&harness.page);
         let resolution = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_session_for_frame("outer-frame", "session-a");
             state.record_frame(
                 "outer-frame".to_string(),
@@ -16343,7 +16346,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .session_pin_for_frame(frame_id)
             .expect("attached iframe must have a production attachment pin");
         PendingIframeSetup {
@@ -16362,12 +16365,12 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .subscribe_session_updates();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if let Some(pin) = {
-                    let state = harness.page.frame_state.lock().unwrap();
+                    let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     (state.frame_sessions.get(frame_id).map(String::as_str) == Some(session_id)
                         && state.iframe_sessions_ready.contains(session_id))
                     .then(|| {
@@ -16423,7 +16426,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_swaps
                     .get(frame_id)
                     .is_some_and(|swap| swap.lineage.len() == expected_lineage_len);
@@ -16444,7 +16447,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key(frame_id)
                 {
@@ -16628,7 +16631,7 @@ return this.dataset.mainWorldOverride === "observed";
             .unwrap()
             .unwrap();
         assert_eq!(resolved.session_id, "manual-child-session");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let pin = state
             .session_pin_for_frame("child-frame")
             .expect("manual attachment must retain a generation pin");
@@ -16680,7 +16683,7 @@ return this.dataset.mainWorldOverride === "observed";
             result,
             Err(RwError::TargetClosed(TargetClosedKind::Page))
         ));
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.frames.is_empty());
         assert!(state.frame_sessions.is_empty());
         assert!(state.session_frames.is_empty());
@@ -16691,7 +16694,7 @@ return this.dataset.mainWorldOverride === "observed";
     fn page_event_tombstone_rebuilds_child_session_ownership() {
         let harness = navigation_test_harness(8);
         {
-            let mut frame_state = harness.page.frame_state.lock().unwrap();
+            let mut frame_state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             frame_state.record_frame(
                 "main-frame".to_string(),
                 None,
@@ -16851,7 +16854,7 @@ return this.dataset.mainWorldOverride === "observed";
             .unwrap()
             .unwrap();
         assert_eq!(resolved.session_id, "auto-child-session");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state
             .iframe_sessions_routable
             .contains("auto-child-session"));
@@ -16930,7 +16933,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .session_pin_for_frame("racing-child-frame")
                 .unwrap()
                 .session_id,
@@ -16969,7 +16972,7 @@ return this.dataset.mainWorldOverride === "observed";
             .unwrap();
         assert_eq!(resolved.session_id, "auto-winner-session");
         harness.reply_error(&detach, "No session with given id");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state
             .session_frames
             .contains_key("redundant-manual-session"));
@@ -17013,7 +17016,7 @@ return this.dataset.mainWorldOverride === "observed";
             json!({ "sessionId": "same-generation-session" }),
         );
         let withheld_auto_attach = harness.next_command("Target.setAutoAttach").await;
-        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap().len(), 1);
+        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len(), 1);
 
         harness.emit(json!({
             "sessionId": "page-session",
@@ -17033,7 +17036,7 @@ return this.dataset.mainWorldOverride === "observed";
                 if page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frames
                     .get("same-generation-frame")
                     .is_some_and(|frame| frame.name == "auto-event-observed")
@@ -17045,7 +17048,7 @@ return this.dataset.mainWorldOverride === "observed";
         })
         .await
         .expect("auto-attach event must reach the production listener");
-        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap().len(), 1);
+        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len(), 1);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), harness.write_rx.recv())
                 .await
@@ -17060,9 +17063,9 @@ return this.dataset.mainWorldOverride === "observed";
         let close_target = harness.next_command("Target.closeTarget").await;
         harness.reply(&close_target, json!({}));
         close.await.unwrap().unwrap();
-        assert!(page.iframe_setup_tasks.handles.lock().unwrap().is_empty());
+        assert!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty());
         assert!(
-            harness.pending.lock().unwrap().is_empty(),
+            harness.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty(),
             "page close must cancel every same-generation setup task"
         );
         harness.reply_error(&withheld_auto_attach, "No session with given id");
@@ -17123,7 +17126,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frames
                     .contains_key("fast-frame")
                 {
@@ -17185,7 +17188,7 @@ return this.dataset.mainWorldOverride === "observed";
             .await
             .unwrap();
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let pin = state
             .session_pin_for_frame("replayed-frame")
             .expect("replayed successor attachment");
@@ -17221,7 +17224,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .session_pin_for_frame("pre-subscription-frame")
                 .unwrap()
                 .session_id,
@@ -17234,7 +17237,7 @@ return this.dataset.mainWorldOverride === "observed";
     async fn real_event_log_overflow_prunes_session_whose_detach_was_evicted() {
         let mut harness = navigation_test_harness(1);
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 "root-frame".to_string(),
                 None,
@@ -17279,7 +17282,7 @@ return this.dataset.mainWorldOverride === "observed";
             }));
         }
         {
-            let log = harness.event_log.lock().unwrap();
+            let log = harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(log.events.len(), CDP_EVENT_LOG_LIMIT);
             assert!(log.oldest_seq() > event_cursor);
         }
@@ -17306,7 +17309,7 @@ return this.dataset.mainWorldOverride === "observed";
         harness.reply_error(&stale_frame_tree, "No session with given id");
         reconciliation.await.unwrap().unwrap();
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("stale-frame"));
         assert!(!state.frame_sessions.contains_key("stale-frame"));
         assert!(!state.session_frames.contains_key("stale-session"));
@@ -17319,7 +17322,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(1);
         let genuine_setup_error = "post-routability iframe setup failed";
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let persistent_pin =
                 state.record_session_for_frame("persistent-frame", "persistent-session");
             state
@@ -17375,7 +17378,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_session_errors
                     .get("persistent-frame")
                     .is_some_and(|error| error.contains("overflow reconciliation failed"))
@@ -17392,7 +17395,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .frame_session_errors
                 .get("genuine-error-frame")
                 .map(String::as_str),
@@ -17438,7 +17441,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_session_errors
                     .contains_key("persistent-frame")
                 {
@@ -17454,7 +17457,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .frame_session_errors
                 .get("genuine-error-frame")
                 .map(String::as_str),
@@ -17534,14 +17537,14 @@ return this.dataset.mainWorldOverride === "observed";
             Duration::from_secs(5),
         );
         let auto_attach = harness.next_command("Target.setAutoAttach").await;
-        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap().len(), 1);
+        assert_eq!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len(), 1);
 
         let closing_page = Arc::clone(&page);
         let close = tokio::spawn(async move {
             page_close_async(closing_page, Duration::from_secs(1), false).await
         });
         let close_target = harness.next_command("Target.closeTarget").await;
-        assert!(page.iframe_setup_tasks.handles.lock().unwrap().is_empty());
+        assert!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty());
         harness.reply(&close_target, json!({}));
         close.await.unwrap().unwrap();
         harness.reply_error(&auto_attach, "No session with given id");
@@ -17562,7 +17565,7 @@ return this.dataset.mainWorldOverride === "observed";
             Duration::from_secs(5),
         );
         let withheld_auto_attach = harness.next_command("Target.setAutoAttach").await;
-        let registry = page.iframe_setup_tasks.handles.lock().unwrap();
+        let registry = page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(registry.len(), 1);
 
         let closing_page = Arc::clone(&page);
@@ -17597,10 +17600,10 @@ return this.dataset.mainWorldOverride === "observed";
         drop(registry);
 
         let close_target = harness.next_command("Target.closeTarget").await;
-        assert!(page.iframe_setup_tasks.handles.lock().unwrap().is_empty());
+        assert!(page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty());
         harness.reply(&close_target, json!({}));
         close.await.unwrap().unwrap();
-        assert!(harness.pending.lock().unwrap().is_empty());
+        assert!(harness.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty());
         harness.reply_error(&withheld_auto_attach, "No session with given id");
     }
 
@@ -17624,7 +17627,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .iframe_setup_tasks
                 .handles
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .len(),
             MAX_ATTACHED_IFRAME_SETUP_TASKS
         );
@@ -17632,7 +17635,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_session_errors
             .contains_key(&format!(
                 "bounded-frame-{}",
@@ -17658,7 +17661,7 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_empty());
     }
 
@@ -17667,7 +17670,7 @@ return this.dataset.mainWorldOverride === "observed";
         let harness = navigation_test_harness(8);
         for index in 0..1024 {
             let frame_id = format!("churn-frame-{index}");
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 frame_id.clone(),
                 Some("root-frame".to_string()),
@@ -17684,13 +17687,13 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_attachment_locks
             .is_empty());
 
         let frame_id = "in-flight-frame";
         let attachment_lock = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 frame_id.to_string(),
                 Some("root-frame".to_string()),
@@ -17705,13 +17708,13 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove_frame(frame_id);
         assert!(harness
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_attachment_locks
             .contains_key(frame_id));
         drop(guard);
@@ -17719,13 +17722,13 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .reclaim_attachment_lock(frame_id, &attachment_lock);
         assert!(!harness
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_attachment_locks
             .contains_key(frame_id));
     }
@@ -17803,7 +17806,7 @@ return this.dataset.mainWorldOverride === "observed";
             .unwrap()
             .unwrap();
         assert_eq!(resolved.session_id, "existing-child-session");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state
             .iframe_sessions_routable
             .contains("existing-child-session"));
@@ -17837,7 +17840,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .session_pin_for_frame("ordered-child-frame")
             .expect("auto-attached frame must be generation-pinned");
         let waiter_page = Arc::clone(&harness.page);
@@ -17940,7 +17943,7 @@ return this.dataset.mainWorldOverride === "observed";
             .next_command("Page.setInterceptFileChooserDialog")
             .await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .iframe_sessions_routable
                 .contains("click-child-session"));
@@ -18150,7 +18153,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iframe_sessions_ready
             .contains("click-child-session"));
 
@@ -18193,7 +18196,7 @@ return this.dataset.mainWorldOverride === "observed";
             .next_command("Page.setInterceptFileChooserDialog")
             .await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .iframe_sessions_routable
                 .contains("fill-child-session"));
@@ -18282,9 +18285,9 @@ return this.dataset.mainWorldOverride === "observed";
     async fn routable_attachment_seeds_frame_lookup_metadata_until_navigation() {
         let mut harness = navigation_test_harness(16);
         harness.listen_for_oopif_events();
-        *harness.page.main_frame_id.lock().unwrap() = Some("root-frame".to_string());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("root-frame".to_string());
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_frame(
                 "root-frame".to_string(),
                 None,
@@ -18342,7 +18345,7 @@ return this.dataset.mainWorldOverride === "observed";
             Some("adopted-name")
         );
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state
                 .iframe_sessions_routable
                 .contains("metadata-child-session"));
@@ -18369,7 +18372,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frames
                     .get("metadata-child-frame")
                     .is_some_and(|frame| frame.url == "https://fresh.example.test/navigated");
@@ -18382,7 +18385,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await
         .expect("frameNavigated metadata must reach the cache");
         {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let pin = state
                 .session_pin_for_frame("metadata-child-frame")
                 .expect("current attachment pin");
@@ -18446,7 +18449,7 @@ return this.dataset.mainWorldOverride === "observed";
         )
         .await;
 
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let frame = state.frames.get("metadata-frame").expect("attached frame");
         assert_eq!(state.frame_sessions["metadata-frame"], "current-session");
         assert_eq!(frame.name, "current-name");
@@ -18500,7 +18503,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::task::yield_now().await;
         assert!(!stale_waiter.is_finished());
 
-        let mut state = harness.page.frame_state.lock().unwrap();
+        let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.iframe_sessions_armed.contains("child-session"));
         assert!(state.iframe_setup_started.contains("child-session"));
         state
@@ -18526,7 +18529,7 @@ return this.dataset.mainWorldOverride === "observed";
             stale_error.to_string(),
             "iframe session detached during attachment"
         );
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("child-frame"));
         assert!(!state.frame_sessions.contains_key("child-frame"));
         assert!(!state
@@ -18575,7 +18578,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .session_pin_for_frame("child-frame")
             .expect("child attachment pin");
 
@@ -18604,7 +18607,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frames
                     .get("child-frame")
                     .is_some_and(|frame| frame.url == "https://example.test/adoption-barrier");
@@ -18618,7 +18621,7 @@ return this.dataset.mainWorldOverride === "observed";
         .expect("production listener must process the detach before the barrier event");
 
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(
                 state.session_pin_for_frame("child-frame"),
                 Some(adopted_pin.clone())
@@ -18633,7 +18636,7 @@ return this.dataset.mainWorldOverride === "observed";
             assert!(!state.frame_swaps.contains_key("child-frame"));
         }
         assert!(
-            harness.pending.lock().unwrap().contains_key(&focus_id),
+            harness.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains_key(&focus_id),
             "the adopted session's queued focus command must remain live"
         );
         assert_eq!(
@@ -18655,11 +18658,11 @@ return this.dataset.mainWorldOverride === "observed";
 
         harness.reply(&focus, json!({}));
         assert!(
-            !harness.pending.lock().unwrap().contains_key(&focus_id),
+            !harness.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains_key(&focus_id),
             "the focus response must complete the still-live command"
         );
         wait_for_iframe_setup_ready(&mut harness, "child-frame", "child-session").await;
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.iframe_sessions_ready.contains("child-session"));
         assert!(!state.frame_swaps.contains_key("child-frame"));
     }
@@ -18698,7 +18701,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frames
                     .get("child-frame")
                     .is_some_and(|frame| frame.url == "https://example.test/adopted");
@@ -18711,7 +18714,7 @@ return this.dataset.mainWorldOverride === "observed";
         .await
         .expect("adoption-completion event must pass through production dispatch");
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(
                 state.session_pin_for_frame("child-frame"),
                 Some(adopted_pin.clone())
@@ -18727,7 +18730,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         wait_for_swap_detach(&harness, "child-frame", 1).await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let swap = &state.frame_swaps["child-frame"];
             assert_eq!(swap.lineage.len(), 1);
             assert_eq!(swap.lineage[0].losing_session_id, "adopted-session");
@@ -18772,7 +18775,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .unwrap(),
             Some("successor-session".to_string())
         );
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frame_swaps.contains_key("child-frame"));
         assert!(!state.frame_session_waiters.contains_key("child-frame"));
     }
@@ -18832,7 +18835,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_swaps
                     .contains_key("child-frame")
                 {
@@ -18848,18 +18851,18 @@ return this.dataset.mainWorldOverride === "observed";
             .iframe_setup_tasks
             .handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&old_generation));
         let old_setup_id = old_setup_reply["id"].as_u64().unwrap();
         tokio::time::timeout(Duration::from_millis(100), async {
-            while harness.pending.lock().unwrap().contains_key(&old_setup_id) {
+            while harness.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains_key(&old_setup_id) {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("swap must cancel the losing generation's pending setup command");
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.frames.contains_key("child-frame"));
             assert_eq!(
                 state.frame_sessions.get("child-frame").map(String::as_str),
@@ -18892,7 +18895,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::time::timeout(Duration::from_millis(100), async {
             loop {
                 let detached = {
-                    let state = harness.page.frame_state.lock().unwrap();
+                    let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     !state.frame_sessions.contains_key("child-frame")
                         && state.frames["child-frame"].session_id.is_none()
                 };
@@ -18926,7 +18929,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::time::timeout(Duration::from_millis(100), async {
             loop {
                 let observation_ingested_without_session = {
-                    let state = harness.page.frame_state.lock().unwrap();
+                    let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.frames["child-frame"].url == "https://example.test/during-swap"
                         && !state.frame_sessions.contains_key("child-frame")
                         && state.frames["child-frame"].session_id.is_none()
@@ -18995,7 +18998,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert_eq!(resolved, Some("new-session".to_string()));
         wait_for_iframe_setup_ready(&mut harness, "child-frame", "new-session").await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.iframe_sessions_ready.contains("new-session"));
             assert!(!state.iframe_sessions_armed.contains("old-session"));
             assert!(!state.iframe_sessions_ready.contains("old-session"));
@@ -19011,7 +19014,7 @@ return this.dataset.mainWorldOverride === "observed";
         let harness = navigation_test_harness(8);
         harness.listen_for_oopif_events();
         let pin = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let pin = state.record_session_for_frame("child-frame", "old-session");
             state.record_frame(
                 "child-frame".to_string(),
@@ -19062,7 +19065,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_swaps
                     .contains_key("child-frame")
                 {
@@ -19073,7 +19076,7 @@ return this.dataset.mainWorldOverride === "observed";
         })
         .await
         .expect("non-swap detach must terminalize the pending swap");
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frames.contains_key("child-frame"));
         assert!(!state.frame_sessions.contains_key("child-frame"));
     }
@@ -19083,7 +19086,7 @@ return this.dataset.mainWorldOverride === "observed";
         let harness = navigation_test_harness(8);
         harness.listen_for_oopif_events();
         let pin = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let pin = state.record_session_for_frame("child-frame", "old-session");
             state.record_frame(
                 "child-frame".to_string(),
@@ -19122,7 +19125,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!waiter.is_finished());
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(!state.session_frames.contains_key("old-session"));
             assert!(!state.iframe_sessions_armed.contains("old-session"));
             assert!(!state.iframe_sessions_ready.contains("old-session"));
@@ -19152,7 +19155,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(16);
         harness.listen_for_oopif_events();
         let old_pin = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let pin = state.record_session_for_frame("child-frame", "shared-session");
             state.record_frame(
                 "child-frame".to_string(),
@@ -19192,7 +19195,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::time::timeout(Duration::from_millis(100), async {
             loop {
                 let consumed = {
-                    let state = harness.page.frame_state.lock().unwrap();
+                    let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     !state.frame_sessions.contains_key("child-frame")
                         && state.frame_swaps["child-frame"].lineage[0].losing_detach_consumed
                 };
@@ -19226,7 +19229,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iframe_sessions_armed
             .contains("shared-session"));
 
@@ -19245,7 +19248,7 @@ return this.dataset.mainWorldOverride === "observed";
             "iframe session detached during attachment"
         );
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(!state.frame_sessions.contains_key("child-frame"));
             assert!(!state.frame_swaps.contains_key("child-frame"));
             assert!(!state.session_frames.contains_key("shared-session"));
@@ -19264,7 +19267,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(32);
         harness.listen_for_oopif_events();
         let generation_one = {
-            let mut state = harness.page.frame_state.lock().unwrap();
+            let mut state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let pin = state.record_session_for_frame("child-frame", "session-a");
             state.record_frame(
                 "child-frame".to_string(),
@@ -19307,7 +19310,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key("child-frame")
                 {
@@ -19343,7 +19346,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         tokio::time::timeout(Duration::from_millis(100), async {
             loop {
-                if harness.page.frame_state.lock().unwrap().frame_swaps["child-frame"]
+                if harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frame_swaps["child-frame"]
                     .lineage
                     .len()
                     == 2
@@ -19367,7 +19370,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key("child-frame")
                 {
@@ -19419,7 +19422,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert_eq!(resolved, Some("session-c".to_string()));
         wait_for_iframe_setup_ready(&mut harness, "child-frame", "session-c").await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(!state.frame_swaps.contains_key("child-frame"));
             assert!(!state.frame_session_waiters.contains_key("child-frame"));
         }
@@ -19462,7 +19465,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .frame_session_waiters
                 .get("child-frame")
                 .and_then(|waiters| waiters.get(&generation_one_id)),
@@ -19485,7 +19488,7 @@ return this.dataset.mainWorldOverride === "observed";
         attach_iframe_and_wait_for_ready(&mut harness, "child-frame", "root-frame", "session-b")
             .await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.frame_swaps["child-frame"].successor_ready);
         }
         harness.emit(json!({
@@ -19495,7 +19498,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         wait_for_swap_detach(&harness, "child-frame", 2).await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(state.frame_swaps["child-frame"].lineage.len(), 2);
             assert!(!state.frame_swaps["child-frame"].successor_ready);
         }
@@ -19515,7 +19518,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .unwrap(),
             Some("session-c".to_string())
         );
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!state.frame_swaps.contains_key("child-frame"));
         assert!(!state.frame_session_waiters.contains_key("child-frame"));
         drop(state);
@@ -19539,7 +19542,7 @@ return this.dataset.mainWorldOverride === "observed";
                 .page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .session_pin_for_frame("child-frame")
                 .expect("current attachment pin");
             let pinned_generation = pin.generation;
@@ -19567,7 +19570,7 @@ return this.dataset.mainWorldOverride === "observed";
                         .page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .frame_session_waiters
                         .get("child-frame")
                         .and_then(|waiters| waiters.get(&pinned_generation))
@@ -19603,7 +19606,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .unwrap(),
                 Some(successor_session)
             );
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.frame_swaps.is_empty());
             assert!(state.frame_session_waiters.is_empty());
         }
@@ -19636,7 +19639,7 @@ return this.dataset.mainWorldOverride === "observed";
         attach_iframe_and_wait_for_ready(&mut harness, "child-frame", "root-frame", "session-b")
             .await;
         {
-            let state = harness.page.frame_state.lock().unwrap();
+            let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.frame_swaps.is_empty());
             assert!(state.frame_session_waiters.is_empty());
         }
@@ -19653,7 +19656,7 @@ return this.dataset.mainWorldOverride === "observed";
             .unwrap(),
             Some("session-b".to_string())
         );
-        let state = harness.page.frame_state.lock().unwrap();
+        let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.frame_swaps.is_empty());
         assert!(state.frame_session_waiters.is_empty());
         drop(state);
@@ -19692,7 +19695,7 @@ return this.dataset.mainWorldOverride === "observed";
         tokio::time::timeout(Duration::from_millis(100), async {
             loop {
                 let all_registered = {
-                    let state = harness.page.frame_state.lock().unwrap();
+                    let state = harness.page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     [
                         ("frame-a", pending_a.pin.generation),
                         ("frame-b", pending_b.pin.generation),
@@ -19732,7 +19735,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key("frame-a")
                 {
@@ -19814,7 +19817,7 @@ return this.dataset.mainWorldOverride === "observed";
                     .page
                     .frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_sessions
                     .contains_key("child-frame")
                 {
@@ -19843,7 +19846,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .session_pin_for_frame("child-frame")
             .expect("replacement pin");
         let replacement_generation = replacement_pin.generation;
@@ -19903,7 +19906,7 @@ return this.dataset.mainWorldOverride === "observed";
             .page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iframe_sessions_ready
             .contains("child-session"));
 
@@ -20031,7 +20034,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[test]
     fn legacy_navigation_events_and_opt_in_details_report_both_navigation_classes() {
         let harness = navigation_test_harness(4);
-        *harness.page.main_frame_id.lock().unwrap() = Some("frame-1".to_owned());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("frame-1".to_owned());
         let frame = json!({
             "sessionId": "page-session",
             "method": "Page.frameNavigated",
@@ -20055,7 +20058,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[test]
     fn navigation_detail_stream_is_opt_in_and_delivers_beside_legacy_events() {
         let harness = navigation_test_harness(32);
-        *harness.page.main_frame_id.lock().unwrap() = Some("frame-1".to_owned());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("frame-1".to_owned());
         assert_eq!(harness.events.receiver_count(), 0);
 
         let page = RustwrightPage {
@@ -20110,7 +20113,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[test]
     fn navigation_detail_queue_drops_oldest_at_capacity() {
         let harness = navigation_test_harness(256);
-        *harness.page.main_frame_id.lock().unwrap() = Some("frame-main".to_owned());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("frame-main".to_owned());
         let page = RustwrightPage {
             inner: Arc::clone(&harness.page),
         };
@@ -20147,7 +20150,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[test]
     fn navigation_detail_boundary_uses_ingress_sequence_before_forwarding() {
         let harness = navigation_test_harness(8);
-        *harness.page.main_frame_id.lock().unwrap() = Some("frame-main".to_owned());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("frame-main".to_owned());
         let page = RustwrightPage {
             inner: Arc::clone(&harness.page),
         };
@@ -20156,7 +20159,7 @@ return this.dataset.mainWorldOverride === "observed";
         // Hold the production queue lock so the real receiver task cannot
         // forward the detail even though CDP ingress and its event-log sequence
         // have completed.
-        let queue_guard = receiver.queue.state.lock().unwrap();
+        let queue_guard = receiver.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         harness.emit(json!({
             "sessionId": "page-session",
             "method": "Page.frameNavigated",
@@ -21024,7 +21027,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[test]
     fn legacy_history_accepts_base_event_ordering_with_stale_or_absent_frame_ids() {
         let mut harness = navigation_test_harness(16);
-        *harness.page.main_frame_id.lock().unwrap() = Some("stale-frame".to_owned());
+        *harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("stale-frame".to_owned());
         let page = RustwrightPage {
             inner: Arc::clone(&harness.page),
         };
@@ -22027,12 +22030,12 @@ return this.dataset.mainWorldOverride === "observed";
             );
         }
 
-        assert_eq!(client.runtime_state.lock().unwrap().serializers.len(), 1);
+        assert_eq!(client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).serializers.len(), 1);
         assert_eq!(
             client
                 .runtime_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .serializer_install_locks
                 .len(),
             1
@@ -22080,7 +22083,7 @@ return this.dataset.mainWorldOverride === "observed";
                 "params": { "sessionId": "page-session" },
             }));
             {
-                let state = client.runtime_state.lock().unwrap();
+                let state = client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 assert!(!state.serializer_generations.contains_key(&realm));
                 assert!(state.serializer_install_locks.is_empty());
             }
@@ -22089,7 +22092,7 @@ return this.dataset.mainWorldOverride === "observed";
                 install.await.unwrap().unwrap_err().to_string(),
                 "Execution context was destroyed, most likely because of a navigation."
             );
-            let state = client.runtime_state.lock().unwrap();
+            let state = client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(state.serializers.is_empty());
             assert!(
                 state.serializer_install_locks.is_empty(),
@@ -22123,7 +22126,7 @@ return this.dataset.mainWorldOverride === "observed";
         harness.reply_error_with_code(&install_command, -32_000, "serializer install failed");
 
         assert!(install.await.unwrap().is_err());
-        let state = client.runtime_state.lock().unwrap();
+        let state = client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.serializer_install_locks.is_empty());
         assert!(state.serializer_generations.is_empty());
     }
@@ -22133,7 +22136,7 @@ return this.dataset.mainWorldOverride === "observed";
         let mut harness = navigation_test_harness(4);
         let client = Arc::clone(&harness.page.browser.client);
         let (release_tx, release_rx) = mpsc::unbounded_channel();
-        client.runtime_state.lock().unwrap().release_tx = Some(release_tx);
+        client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).release_tx = Some(release_tx);
         spawn_serializer_release_pump(release_rx, client.write_tx.clone());
         let realm = client.serializer_realm_key("page-session", Some("frame:main"));
         let (generation, install_lock) = client.serializer_install_lock(&realm);
@@ -22166,7 +22169,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(client
             .runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .serializer_install_locks
             .is_empty());
     }
@@ -22495,7 +22498,7 @@ return this.dataset.mainWorldOverride === "observed";
     #[tokio::test]
     async fn history_navigation_resolves_missing_main_frame_before_matching_events() {
         let mut harness = navigation_test_harness(8);
-        assert!(harness.page.main_frame_id.lock().unwrap().is_none());
+        assert!(harness.page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none());
         let page = Arc::clone(&harness.page);
         let client = Arc::clone(&page.browser.client);
         let resolve_frame = page.main_frame_id(&client, "page-session", Duration::from_millis(100));
@@ -22909,7 +22912,7 @@ return this.dataset.mainWorldOverride === "observed";
             }));
         }
 
-        assert!(harness.event_log.lock().unwrap().oldest_seq() > 0);
+        assert!(harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq() > 0);
         assert_eq!(
             dispatch.single_evaluation_receipt(),
             Some(json!({ "ok": true, "selected": ["b"] }).to_string())
@@ -22918,7 +22921,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(harness
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .action_dispatch_receipts
             .is_empty());
     }
@@ -23018,7 +23021,7 @@ return this.dataset.mainWorldOverride === "observed";
             state.ready.get(&0).unwrap()["payload"]["reason"],
             "unreplayable_event"
         );
-        assert_eq!(requests.lock().unwrap().next_applied_seq, 1);
+        assert_eq!(requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).next_applied_seq, 1);
     }
 
     #[test]
@@ -23066,14 +23069,14 @@ return this.dataset.mainWorldOverride === "observed";
             "params": { "type": "log", "args": [{ "value": "late" }] }
         }));
 
-        assert!(harness.event_log.lock().unwrap().events.is_empty());
+        assert!(harness.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).events.is_empty());
         assert!(harness
             .page
             .browser
             .client
             .traffic_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries
             .is_empty());
         assert!(harness
@@ -23082,7 +23085,7 @@ return this.dataset.mainWorldOverride === "observed";
             .client
             .runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .serializers
             .is_empty());
     }
@@ -23123,14 +23126,14 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(!page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .owns_session("child-session"));
         assert!(page
             .browser
             .client
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .events
             .is_empty());
     }
@@ -23156,7 +23159,7 @@ return this.dataset.mainWorldOverride === "observed";
         }));
         let event = event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries_since(0)
             .last()
             .expect("worker attachment event")
@@ -23198,7 +23201,7 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(!page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .owns_session("worker-session"));
         assert_eq!(
             remove_page_worker_session_from_detachment(
@@ -24245,7 +24248,7 @@ return this.dataset.mainWorldOverride === "observed";
     fn nested_first_reply_constructs_only_the_suspected_protocol_variant() {
         let pending: CdpPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (sender, receiver) = oneshot::channel();
-        pending.lock().unwrap().insert(1, sender);
+        pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(1, sender);
         let detector = AtomicBool::new(true);
         let (events, _) = broadcast::channel(4);
         dispatch_cdp_payload_with_diagnostics(
@@ -24275,7 +24278,7 @@ return this.dataset.mainWorldOverride === "observed";
         let pending: CdpPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let outstanding: CdpOutstandingMap = Arc::new(Mutex::new(HashMap::new()));
         let (sender, receiver) = oneshot::channel();
-        pending.lock().unwrap().insert(1, sender);
+        pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(1, sender);
         let detector = AtomicBool::new(true);
         let (events, _) = broadcast::channel(4);
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
@@ -24312,7 +24315,7 @@ return this.dataset.mainWorldOverride === "observed";
     fn normal_cdp_error_shape_keeps_ordinary_message_for_command_wrapping() {
         let pending: CdpPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (sender, receiver) = oneshot::channel();
-        pending.lock().unwrap().insert(1, sender);
+        pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(1, sender);
         let detector = AtomicBool::new(true);
         let (events, _) = broadcast::channel(4);
         dispatch_cdp_payload_with_diagnostics(
@@ -25733,15 +25736,15 @@ impl CdpRetentionGate {
     }
 
     fn lock_for_write(&self) -> Option<MutexGuard<'_, ()>> {
-        let guard = self.write_lock.lock().unwrap();
+        let guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.enabled.load(Ordering::SeqCst).then_some(guard)
     }
     fn lock_for_release(&self) -> MutexGuard<'_, ()> {
-        self.write_lock.lock().unwrap()
+        self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn disable(&self) {
-        let _guard = self.write_lock.lock().unwrap();
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.enabled.store(false, Ordering::SeqCst);
     }
 
@@ -26003,16 +26006,16 @@ fn dispatch_cdp_payload_with_diagnostics(
     runtime_state: Arc<Mutex<CdpRuntimeState>>,
     playwright_like_first_reply: Option<&AtomicBool>,
 ) {
-    let retention_gate = event_log.lock().unwrap().retention_gate.clone();
+    let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
     let Some(_retention_guard) = retention_gate.lock_for_write() else {
         return;
     };
     if let Some(id) = payload.get("id").and_then(Value::as_u64) {
-        let sender = pending.lock().unwrap().remove(&id);
-        let command = outstanding.lock().unwrap().remove(&id);
+        let sender = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
+        let command = outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
         traffic_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(CdpTrafficEntry::received_response(
                 &payload,
                 command.as_ref(),
@@ -26055,7 +26058,7 @@ fn dispatch_cdp_payload_with_diagnostics(
             let _ = sender.send(result);
         }
     } else {
-        runtime_state.lock().unwrap().observe_event(&payload);
+        runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).observe_event(&payload);
         if payload.get("guid").is_none() && payload.get("method").and_then(Value::as_str).is_some()
         {
             if let Some(detector) = playwright_like_first_reply {
@@ -26064,9 +26067,9 @@ fn dispatch_cdp_payload_with_diagnostics(
         }
         traffic_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(CdpTrafficEntry::received_event(&payload));
-        let mut event_log = event_log.lock().unwrap();
+        let mut event_log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         event_log.record_action_dispatch_receipt(&payload);
         let payload = event_log.push(payload);
         let _ = events.send(payload);
@@ -26097,23 +26100,23 @@ fn close_pending_cdp_commands(
     traffic_log: Arc<Mutex<CdpTrafficLog>>,
     event_log: Arc<Mutex<CdpEventLog>>,
 ) {
-    let retention_gate = event_log.lock().unwrap().retention_gate.clone();
+    let retention_gate = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
     let Some(_retention_guard) = retention_gate.lock_for_write() else {
         return;
     };
     let pending_commands = {
-        let mut pending = pending.lock().unwrap();
+        let mut pending = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         pending.drain().collect::<Vec<_>>()
     };
     let closed_commands = {
-        let mut outstanding = outstanding.lock().unwrap();
+        let mut outstanding = outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         pending_commands
             .iter()
             .filter_map(|(id, _)| outstanding.remove(id))
             .collect::<Vec<_>>()
     };
     {
-        let mut traffic_log = traffic_log.lock().unwrap();
+        let mut traffic_log = traffic_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for command in closed_commands {
             traffic_log.push(command.traffic_entry("transport-closed"));
         }
@@ -26163,7 +26166,7 @@ impl CdpClient {
             .or_else(|| {
                 self.runtime_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .default_realm_identity(session_id)
             })
             .unwrap_or_else(|| format!("session:{session_id}"));
@@ -26173,7 +26176,7 @@ impl CdpClient {
     fn serializer_handle(&self, realm: &SerializerRealmKey) -> Option<String> {
         self.runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .serializers
             .get(realm)
             .map(|entry| entry.object_id.clone())
@@ -26183,7 +26186,7 @@ impl CdpClient {
         &self,
         realm: &SerializerRealmKey,
     ) -> (u64, Arc<tokio::sync::Mutex<()>>) {
-        let mut runtime_state = self.runtime_state.lock().unwrap();
+        let mut runtime_state = self.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let generation = runtime_state.ensure_serializer_generation(realm);
         let install_lock = runtime_state
             .serializer_install_locks
@@ -26199,7 +26202,7 @@ impl CdpClient {
         generation: u64,
         install_lock: &Arc<tokio::sync::Mutex<()>>,
     ) -> bool {
-        let runtime_state = self.runtime_state.lock().unwrap();
+        let runtime_state = self.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         runtime_state.serializer_generations.get(realm) == Some(&generation)
             && runtime_state
                 .serializer_install_locks
@@ -26215,7 +26218,7 @@ impl CdpClient {
         object_id: String,
         execution_context_id: Option<String>,
     ) -> bool {
-        let mut runtime_state = self.runtime_state.lock().unwrap();
+        let mut runtime_state = self.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let generation_is_current =
             runtime_state.serializer_generations.get(realm) == Some(&generation);
         let lock_is_current = runtime_state
@@ -26243,7 +26246,7 @@ impl CdpClient {
         generation: u64,
         install_lock: &Arc<tokio::sync::Mutex<()>>,
     ) {
-        let mut runtime_state = self.runtime_state.lock().unwrap();
+        let mut runtime_state = self.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let exact_lock = runtime_state
             .serializer_install_locks
             .get(realm)
@@ -26262,7 +26265,7 @@ impl CdpClient {
     fn release_uncommitted_serializer(&self, realm: &SerializerRealmKey, object_id: String) {
         self.runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .enqueue_serializer_release(SerializerRelease {
                 session_id: realm.session_id.clone(),
                 object_id,
@@ -26272,7 +26275,7 @@ impl CdpClient {
     fn forget_serializer(&self, realm: &SerializerRealmKey) {
         self.runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .evict_serializer_realms([realm.clone()], false);
     }
 
@@ -26283,7 +26286,7 @@ impl CdpClient {
     ) -> Option<String> {
         self.runtime_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_id_for_execution_context(session_id, execution_context_id)
     }
 
@@ -26458,7 +26461,7 @@ impl CdpClient {
                         diagnostic_id,
                     } => {
                         let diagnostic = diagnostic_id
-                            .and_then(|id| outstanding_writer.lock().unwrap().get(&id).cloned());
+                            .and_then(|id| outstanding_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned());
                         // The sender abandons a command whose deadline expired; skipping it here is
                         // what makes "not written" a promise rather than a guess.
                         if let Some(tracker) = &tracker {
@@ -26477,11 +26480,11 @@ impl CdpClient {
                         if written {
                             if let Some(diagnostic) = diagnostic {
                                 let retention_gate =
-                                    event_log_writer.lock().unwrap().retention_gate.clone();
+                                    event_log_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
                                 if let Some(_retention_guard) = retention_gate.lock_for_write() {
                                     traffic_log_writer
                                         .lock()
-                                        .unwrap()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                                         .push(diagnostic.traffic_entry("sent"));
                                 };
                             }
@@ -26593,7 +26596,7 @@ impl CdpClient {
                         diagnostic_id,
                     } => {
                         let diagnostic = diagnostic_id
-                            .and_then(|id| outstanding_writer.lock().unwrap().get(&id).cloned());
+                            .and_then(|id| outstanding_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned());
                         // The sender abandons a command whose deadline expired; skipping it here is
                         // what makes "not written" a promise rather than a guess.
                         if let Some(tracker) = &tracker {
@@ -26613,11 +26616,11 @@ impl CdpClient {
                         if written {
                             if let Some(diagnostic) = diagnostic {
                                 let retention_gate =
-                                    event_log_writer.lock().unwrap().retention_gate.clone();
+                                    event_log_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone();
                                 if let Some(_retention_guard) = retention_gate.lock_for_write() {
                                     traffic_log_writer
                                         .lock()
-                                        .unwrap()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                                         .push(diagnostic.traffic_entry("sent"));
                                 };
                             }
@@ -26705,13 +26708,13 @@ impl CdpClient {
     }
 
     fn subscribe_with_cursor(&self) -> (broadcast::Receiver<Value>, u64) {
-        let event_log = self.event_log.lock().unwrap();
+        let event_log = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let receiver = self.events.subscribe();
         (receiver, event_log.cursor())
     }
 
     fn event_cursor(&self) -> u64 {
-        self.event_log.lock().unwrap().cursor()
+        self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor()
     }
     fn begin_action_dispatch<'a>(
         &'a self,
@@ -26726,7 +26729,7 @@ impl CdpClient {
         if !self.is_connected() {
             return Err(RwError::Disconnected);
         }
-        let registered = self.event_log.lock().unwrap().register_action_dispatch(
+        let registered = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).register_action_dispatch(
             session_id,
             dispatch_id.to_string(),
             token.to_string(),
@@ -26751,14 +26754,14 @@ impl CdpClient {
     ) -> Option<ActionDispatchReceipt> {
         self.event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .action_dispatch_receipt(session_id, dispatch_id)
     }
 
     fn settle_action_dispatch(&self, session_id: &str, dispatch_id: &str) -> Option<String> {
         self.event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .settle_action_dispatch(session_id, dispatch_id)
     }
 
@@ -26767,7 +26770,7 @@ impl CdpClient {
     }
 
     fn retention_gate(&self) -> Arc<CdpRetentionGate> {
-        self.event_log.lock().unwrap().retention_gate.clone()
+        self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retention_gate.clone()
     }
 
     fn retention_enabled(&self) -> bool {
@@ -26789,11 +26792,11 @@ impl CdpClient {
         // Serialize terminal release with every dispatcher and page-event write. Once disabled,
         // no reader or in-flight handler can repopulate the stores after this clear.
         self.retention_gate().disable();
-        self.event_log.lock().unwrap().clear_retained();
-        self.traffic_log.lock().unwrap().clear_for_close();
-        self.runtime_state.lock().unwrap().clear_for_close();
-        self.pending.lock().unwrap().clear();
-        self.outstanding.lock().unwrap().clear();
+        self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_retained();
+        self.traffic_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_for_close();
+        self.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_for_close();
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     fn record_sent_command(&self, method: &str) {
@@ -26834,16 +26837,16 @@ impl CdpClient {
     }
 
     fn pending_command_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
     }
 
     fn diagnostic_snapshot(&self) -> CdpClientDiagnosticSnapshot {
         let captured_at = Instant::now();
-        let traffic = self.traffic_log.lock().unwrap().snapshot();
+        let traffic = self.traffic_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).snapshot();
         let mut outstanding = self
             .outstanding
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -26859,7 +26862,7 @@ impl CdpClient {
     }
 
     fn navigation_waiting_for(&self, session_id: &str, started_at: Instant) -> String {
-        if self.outstanding.lock().unwrap().values().any(|command| {
+        if self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().any(|command| {
             command.method == "Page.navigate"
                 && command.session_id.as_deref() == Some(session_id)
                 && command.started_at >= started_at
@@ -26869,7 +26872,7 @@ impl CdpClient {
 
         self.traffic_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .page_navigate_waiting_for(session_id, started_at)
             .unwrap_or("Page.goto cancellation before Page.navigate was sent")
             .to_string()
@@ -26924,8 +26927,8 @@ impl CdpClient {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, response) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        self.outstanding.lock().unwrap().insert(
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, tx);
+        self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
             id,
             CdpOutstandingCommand {
                 id,
@@ -26957,7 +26960,7 @@ impl CdpClient {
         let send_result = {
             // Event insertion and command enqueue share this mutex boundary, so every
             // stamped event is ordered unambiguously before or after the command.
-            let _event_log = self.event_log.lock().unwrap();
+            let _event_log = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             self.write_tx.send(CdpOutgoing::Text {
                 payload: payload.to_string(),
                 tracker: None,
@@ -27058,12 +27061,12 @@ impl CdpClient {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, tx);
         let write_state = tracker
             .as_ref()
             .map(|tracker| Arc::clone(&tracker.state))
             .unwrap_or_else(|| Arc::new(CdpWriteState::new()));
-        self.outstanding.lock().unwrap().insert(
+        self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
             id,
             CdpOutstandingCommand {
                 id,
@@ -27102,7 +27105,7 @@ impl CdpClient {
                 // Event insertion and command enqueue share this mutex boundary.
                 // The recorded cursor therefore orders every received event
                 // unambiguously before or after this command send.
-                let event_log = self.event_log.lock().unwrap();
+                let event_log = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 *cursor = event_log.cursor();
                 self.write_tx.send(outgoing)
             }
@@ -27144,8 +27147,8 @@ impl CdpClient {
         };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        self.outstanding.lock().unwrap().insert(
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, tx);
+        self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
             id,
             CdpOutstandingCommand {
                 id,
@@ -27223,8 +27226,8 @@ impl CdpClient {
         for params_json in params_json_list {
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
             let (tx, rx) = oneshot::channel();
-            self.pending.lock().unwrap().insert(id, tx);
-            self.outstanding.lock().unwrap().insert(
+            self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, tx);
+            self.outstanding.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
                 id,
                 CdpOutstandingCommand {
                     id,
@@ -27434,7 +27437,7 @@ enum AttachedPageClaim {
 
 impl AttachedPageRegistry {
     fn reserve(&self, target_id: &str) -> AttachedPageReservation {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = entries.get(target_id) {
             if let Some(page) = entry.page.upgrade() {
                 return AttachedPageReservation::Existing(page);
@@ -27469,7 +27472,7 @@ impl AttachedPageRegistry {
         generation: u64,
         attach_lock: &Arc<tokio::sync::Mutex<()>>,
     ) -> AttachedPageClaim {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = entries.get(target_id) {
             if let Some(page) = entry.page.upgrade() {
                 return AttachedPageClaim::Existing(page);
@@ -27508,7 +27511,7 @@ impl AttachedPageRegistry {
         generation: u64,
         attach_lock: &Arc<tokio::sync::Mutex<()>>,
     ) -> AttachedPageRegistration {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(entry) = entries.get_mut(target_id) else {
             return AttachedPageRegistration::ReservationLost;
         };
@@ -27535,7 +27538,7 @@ impl AttachedPageRegistry {
         generation: u64,
         attach_lock: &Arc<tokio::sync::Mutex<()>>,
     ) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let should_remove = entries.get(target_id).is_some_and(|entry| {
             entry.generation == generation
                 && Arc::strong_count(attach_lock) == 1
@@ -27548,7 +27551,7 @@ impl AttachedPageRegistry {
     }
 
     fn remove_page(&self, target_id: &str, generation: u64, page: *const PageInner) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if entries
             .get(target_id)
             .is_some_and(|entry| entry.generation == generation && entry.page.as_ptr() == page)
@@ -27558,14 +27561,14 @@ impl AttachedPageRegistry {
     }
 
     fn clear(&self) {
-        self.entries.lock().unwrap().clear();
+        self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     fn diagnostic_snapshot(&self) -> (Vec<AttachedPageDiagnostic>, usize) {
         let mut pages = self
             .entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter_map(|(target_id, entry)| {
                 let page = entry.page.upgrade()?;
@@ -27587,7 +27590,7 @@ impl AttachedPageRegistry {
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
     }
 }
 
@@ -27729,7 +27732,7 @@ impl BrowserInner {
             CloseStart::Wait(_) => return Ok(()),
             CloseStart::Lead(sender) => sender,
         };
-        let owns_browser_process = self.process.lock().unwrap().is_some();
+        let owns_browser_process = self.process.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some();
         if owns_browser_process && tokio::runtime::Handle::try_current().is_err() {
             let client = Arc::clone(&self.client);
             let _ = self.block_on_raw(async move {
@@ -27741,7 +27744,7 @@ impl BrowserInner {
         self.client.close();
 
         let mut cleanup_error = None;
-        if let Some(mut child) = self.process.lock().unwrap().take() {
+        if let Some(mut child) = self.process.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut exited = false;
             while Instant::now() < deadline {
@@ -27764,7 +27767,7 @@ impl BrowserInner {
             }
         }
 
-        self.profile_dir.lock().unwrap().take();
+        self.profile_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let result = cleanup_error.map_or(Ok(()), |error| Err(RwError::Io(error)));
         self.lifecycle.finish(sender, &result, true);
         result
@@ -27823,7 +27826,7 @@ struct BrowserTimeoutDiagnostic {
 }
 
 fn browser_process_diagnostic(browser: &BrowserInner) -> BrowserProcessDiagnostic {
-    let mut process = browser.process.lock().unwrap();
+    let mut process = browser.process.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(child) = process.as_mut() else {
         return if browser.owned {
             BrowserProcessDiagnostic::HandleUnavailable
@@ -28034,7 +28037,7 @@ impl Drop for BrowserInner {
 }
 
 async fn close_browser_cleanup(browser: Arc<BrowserInner>) -> RwResult<()> {
-    if browser.process.lock().unwrap().is_some() {
+    if browser.process.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some() {
         let client = Arc::clone(&browser.client);
         let _ = client
             .send("Browser.close", json!({}), None, Duration::from_secs(3))
@@ -28046,7 +28049,7 @@ async fn close_browser_cleanup(browser: Arc<BrowserInner>) -> RwResult<()> {
 
     tokio::task::spawn_blocking(move || -> RwResult<()> {
         let mut cleanup_error = None;
-        if let Some(mut child) = browser.process.lock().unwrap().take() {
+        if let Some(mut child) = browser.process.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut exited = false;
             while Instant::now() < deadline {
@@ -28068,7 +28071,7 @@ async fn close_browser_cleanup(browser: Arc<BrowserInner>) -> RwResult<()> {
                 let _ = child.wait();
             }
         }
-        browser.profile_dir.lock().unwrap().take();
+        browser.profile_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         cleanup_error.map_or(Ok(()), |error| Err(RwError::Io(error)))
     })
     .await
@@ -28323,7 +28326,7 @@ impl Default for IframeSetupTaskRegistry {
 
 impl IframeSetupTaskRegistry {
     fn auto_attach_lock_for_session(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.auto_attach_locks.lock().unwrap();
+        let mut locks = self.auto_attach_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         Arc::clone(
             locks
                 .entry(session_id.to_string())
@@ -28331,7 +28334,7 @@ impl IframeSetupTaskRegistry {
         )
     }
     fn abort_generations(&self, generations: impl IntoIterator<Item = u64>) {
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = self.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for generation in generations {
             if let Some(entry) = handles.remove(&generation) {
                 if let Some(handle) = entry.handle {
@@ -28342,7 +28345,7 @@ impl IframeSetupTaskRegistry {
     }
 
     fn abort_all(&self) {
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = self.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, entry) in handles.drain() {
             if let Some(handle) = entry.handle {
                 handle.abort();
@@ -28409,15 +28412,15 @@ impl AttachedSessionCleanup {
     }
 
     fn set_session(&self, session_id: String) {
-        *self.session_id.lock().unwrap() = Some(session_id);
+        *self.session_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id);
     }
 
     fn disarm(&self) {
-        self.session_id.lock().unwrap().take();
+        self.session_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     }
 
     fn start(self: &Arc<Self>) -> bool {
-        if self.session_id.lock().unwrap().is_none() {
+        if self.session_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none() {
             return self.started.load(Ordering::SeqCst);
         }
         if self
@@ -28427,7 +28430,7 @@ impl AttachedSessionCleanup {
         {
             return true;
         }
-        let Some(session_id) = self.session_id.lock().unwrap().take() else {
+        let Some(session_id) = self.session_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() else {
             self.done.send_replace(true);
             return false;
         };
@@ -28565,7 +28568,7 @@ impl PageInner {
     fn clear_worker_resume_handoffs_locked(&self) {
         self.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear_worker_resume_handoffs();
     }
 
@@ -28573,17 +28576,17 @@ impl PageInner {
         self.target_closed.store(true, Ordering::SeqCst);
         let retention_gate = self.browser.client.retention_gate();
         let _retention_guard = retention_gate.lock_for_release();
-        self.network_requests.lock().unwrap().clear_for_close();
+        self.network_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_for_close();
         self.native_network_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear_for_close();
-        self.console_records.lock().unwrap().clear_for_close();
+        self.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_for_close();
         self.console_replay_until_event_cursor
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
-        self.frame_state.lock().unwrap().clear_for_close();
+        self.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear_for_close();
         self.console_capture
             .requested
             .store(false, Ordering::SeqCst);
@@ -30993,7 +30996,7 @@ impl PageInner {
             return self
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .session_frames
                 .get(session_id)
                 .cloned()
@@ -31004,7 +31007,7 @@ impl PageInner {
                 });
         }
         if own_session {
-            if let Some(frame_id) = self.main_frame_id.lock().unwrap().clone() {
+            if let Some(frame_id) = self.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() {
                 return Ok(frame_id);
             }
         }
@@ -31017,13 +31020,13 @@ impl PageInner {
             .ok_or_else(|| RwError::Message("CDP did not return a main frame id".to_string()))?
             .to_string();
         if own_session {
-            *self.main_frame_id.lock().unwrap() = Some(frame_id.clone());
+            *self.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(frame_id.clone());
         }
         Ok(frame_id)
     }
 
     fn session_for_frame_id(&self, frame_id: &str) -> RwResult<String> {
-        let state = self.frame_state.lock().unwrap();
+        let state = self.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(session_id) = state.frame_sessions.get(frame_id) {
             return Ok(session_id.clone());
         }
@@ -31036,13 +31039,13 @@ impl PageInner {
     }
 
     fn cached_main_frame_url(&self) -> Option<String> {
-        let main_id = self.main_frame_id.lock().unwrap().clone();
-        let state = self.frame_state.lock().unwrap();
+        let main_id = self.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let state = self.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         resolve_cached_main_frame_url(main_id.as_deref(), &state)
     }
 
     fn record_frame_navigation_url(&self, frame_id: &str, url: &str, session_id: &str) {
-        self.frame_state.lock().unwrap().record_frame(
+        self.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).record_frame(
             frame_id.to_string(),
             None,
             None,
@@ -31052,15 +31055,15 @@ impl PageInner {
     }
 
     fn record_main_frame_navigation_url(&self, frame_id: &str, url: &str) {
-        *self.main_frame_id.lock().unwrap() = Some(frame_id.to_string());
+        *self.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(frame_id.to_string());
         self.record_frame_navigation_url(frame_id, url, &self.session_id);
     }
 
     fn frame_tree_payload(&self) -> Value {
         // Page cache readers never nest these locks. Clone main_frame_id first,
         // release it, then acquire frame_state.
-        let cached_root_id = self.main_frame_id.lock().unwrap().clone();
-        let state = self.frame_state.lock().unwrap();
+        let cached_root_id = self.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let state = self.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_id = cached_root_id.or_else(|| {
             state
                 .frames
@@ -31245,22 +31248,22 @@ impl PageEventStreamLease {
     }
 
     fn commit_delivered(&mut self) {
-        *self.state_slot.lock().unwrap() = self.state.take();
-        *self.cursor_slot.lock().unwrap() = self.cursor;
-        let committed = self.working_requests.lock().unwrap().clone();
-        self.requests.lock().unwrap().merge_committed(&committed);
+        *self.state_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.state.take();
+        *self.cursor_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.cursor;
+        let committed = self.working_requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        self.requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).merge_committed(&committed);
     }
 
     fn restore_rollback(&mut self) {
-        *self.state_slot.lock().unwrap() = self.rollback_state.take();
-        *self.cursor_slot.lock().unwrap() = self.rollback_cursor;
+        *self.state_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.rollback_state.take();
+        *self.cursor_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.rollback_cursor;
     }
 }
 
 #[cfg(feature = "python")]
 impl Drop for PageEventStreamLease {
     fn drop(&mut self) {
-        *self.receiver_slot.lock().unwrap() = self.receiver.take();
+        *self.receiver_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.receiver.take();
         if self.delivered {
             if let Some(page) = self.page.as_ref().map(Arc::clone) {
                 let retention_gate = page.browser.client.retention_gate();
@@ -31306,7 +31309,7 @@ impl PageEventStreamState {
 
     fn for_page(page: &PageInner) -> Self {
         let mut state = Self::for_session(page.session_id.clone());
-        let frame_state = page.frame_state.lock().unwrap();
+        let frame_state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state
             .owned_sessions
             .extend(frame_state.session_frames.keys().cloned());
@@ -31332,7 +31335,7 @@ impl PageEventStreamState {
         state.replay_until = page
             .console_replay_until_event_cursor
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         state
     }
@@ -31342,7 +31345,7 @@ impl PageEventStreamState {
         page: &PageInner,
     ) -> (broadcast::Receiver<Value>, u64, PageEventStreamState) {
         let client = &page.browser.client;
-        let event_log = client.event_log.lock().unwrap();
+        let event_log = client.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let receiver = client.events.subscribe();
         let event_cursor = event_log.cursor();
         let entries = event_log.entries_since(0);
@@ -31366,7 +31369,7 @@ impl PageEventStreamState {
                 page_state.reset_after_overflow();
                 page.network_requests
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .reset_after_overflow(sequence.saturating_add(1));
                 page_state.ready.insert(
                     sequence,
@@ -31433,7 +31436,7 @@ impl PageEventStreamState {
         if session_ids.is_empty() {
             return;
         }
-        let log = event_log.lock().unwrap();
+        let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for session_id in session_ids {
             let Some(cutoff) = log.console_replay_cutoff(session_id) else {
                 continue;
@@ -32191,7 +32194,7 @@ impl PyCdpEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("CDP event waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -32207,7 +32210,7 @@ impl PyCdpEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -32255,7 +32258,7 @@ fn evaluate_locator_wait_probe_for_page(
     let realm_identity = page
         .main_frame_id
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_deref()
         .map(|frame_id| format!("frame:{frame_id}"));
     let browser = Arc::clone(&page.browser);
@@ -32288,7 +32291,7 @@ async fn evaluate_expression_for_page_async(
     let realm_identity = page
         .main_frame_id
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_deref()
         .map(|frame_id| format!("frame:{frame_id}"));
     evaluate_expression_in_session(
@@ -34094,7 +34097,7 @@ fn locator_resolution_ownership_is_current(
     page: &PageInner,
     resolution: &LocatorSessionResolution,
 ) -> bool {
-    let state = page.frame_state.lock().unwrap();
+    let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.frame_ownership_generation != resolution.ownership_generation {
         return false;
     }
@@ -34129,7 +34132,7 @@ async fn execution_context_for_locator_resolution(
     if let Some(context_id) = page
         .frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .cached_execution_context(frame_id, &resolution.session_id)
     {
         return Ok(context_id);
@@ -34144,7 +34147,7 @@ async fn execution_context_for_locator_resolution(
     if !locator_resolution_ownership_is_current(page, resolution) {
         return Err(frame_ownership_changed_error());
     }
-    let cached = page.frame_state.lock().unwrap().cache_execution_context(
+    let cached = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cache_execution_context(
         frame_id,
         &resolution.session_id,
         context_id.clone(),
@@ -34214,7 +34217,7 @@ async fn evaluate_locator_resolution(
     {
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .invalidate_execution_context(&resolution.session_id, &context_id);
     }
     result
@@ -34258,7 +34261,7 @@ async fn evaluate_handle_locator_resolution(
     {
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .invalidate_execution_context(&resolution.session_id, &context_id);
     }
     let remote_json = runtime_result_to_remote_object(&result?)?;
@@ -35750,7 +35753,7 @@ async fn resolve_locator_session_with_frame_mode(
                     (spec.clone(), None)
                 };
             let session_ready_for_refresh = {
-                let state = page.frame_state.lock().unwrap();
+                let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 session_id == state.main_session_id
                     || state.iframe_sessions_ready.contains(&session_id)
             };
@@ -35824,17 +35827,17 @@ async fn resolve_locator_session_with_frame_mode(
             #[cfg(test)]
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .record_locator_resolution_reresolve();
             if session_was_lost {
                 page.frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .detach_session(&stale_session_id);
             } else {
                 page.frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .mark_frame_cache_dirty(&stale_session_id);
                 ensure_frame_tree_session_after_reconcile(
                     &page,
@@ -35848,10 +35851,10 @@ async fn resolve_locator_session_with_frame_mode(
         }
 
         let main_frame_id = consumed_any_oopif
-            .then(|| page.main_frame_id.lock().unwrap().clone())
+            .then(|| page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
             .flatten();
         let (frame_id, ownership_generation) = {
-            let state = page.frame_state.lock().unwrap();
+            let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let frame_id = if consumed_any_oopif {
                 execution_frame_id.or(frame_id).or_else(|| {
                     if session_id == state.main_session_id {
@@ -35999,7 +36002,7 @@ async fn resolve_next_oopif_frame(
         if let Some(mapped_session) = mapped_session {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .detach_session(&mapped_session);
         }
 
@@ -36043,7 +36046,7 @@ impl Drop for FrameAttachmentLockLease {
         let _ = with_live_page_retention(&page, || {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .reclaim_attachment_lock(&self.frame_id, &self.attachment_lock);
         });
     }
@@ -36069,7 +36072,7 @@ async fn attach_iframe_target_for_frame(
         attachment_lock: page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .attachment_lock_for_frame(frame_id),
     };
     let attachment_guard = attachment_lease.attachment_lock.lock().await;
@@ -36358,7 +36361,7 @@ fn frame_session_for_frame(
     frame_id: &str,
     different_from_session_id: Option<&str>,
 ) -> RwResult<Option<String>> {
-    let state = page.frame_state.lock().unwrap();
+    let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(error) = state.frame_session_errors.get(frame_id) {
         return Err(RwError::Message(error.clone()));
     }
@@ -36375,7 +36378,7 @@ async fn wait_for_frame_session(
     deadline: OperationDeadline,
 ) -> RwResult<Option<String>> {
     let Some((mut updates, mut expected_session)) = with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let expected_session = expected_session.or_else(|| {
             state
                 .session_pin_for_frame(frame_id)
@@ -36398,7 +36401,7 @@ async fn wait_for_frame_session(
             });
     loop {
         let Some(outcome) = with_live_page_retention(page, || {
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if expected_session.is_none() {
                 if let Some(pin) = state
                     .session_pin_for_frame(frame_id)
@@ -36457,7 +36460,7 @@ impl Drop for FrameSessionWaiterRegistration {
             let _ = with_live_page_retention(&page, || {
                 page.frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .unregister_frame_session_waiter(&self.frame_id, self.generation);
             });
         }
@@ -38728,7 +38731,7 @@ impl PyPage {
 
     #[cfg(any(test, feature = "test-support"))]
     fn _runtime_state_test_hook(&self) -> String {
-        let state = self.inner.browser.client.runtime_state.lock().unwrap();
+        let state = self.inner.browser.client.runtime_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut serializer_realms = state
             .serializers
             .keys()
@@ -41399,7 +41402,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
         let client = Arc::clone(&browser.client);
         let event_log = Arc::clone(&client.event_log);
         let (receiver, cursor) = {
-            let _log = event_log.lock().unwrap();
+            let _log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let receiver = client.subscribe();
             (receiver, page.event_stream_start_cursor)
         };
@@ -41649,7 +41652,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
         let browser = Arc::clone(&page.browser);
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let sessions = {
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.set_worker_event_interest(interested);
             if interested {
                 Vec::new()
@@ -41680,7 +41683,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
         self.inner
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .set_worker_forwarding_interest(interested);
         Ok(())
     }
@@ -41694,7 +41697,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
         let page = Arc::clone(&self.inner);
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .set_worker_event_interest(true);
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let browser = Arc::clone(&page.browser);
@@ -41706,7 +41709,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
             .auto_attach_lock_for_session(&session_id);
         if configure {
             let owned_sessions = {
-                let state = page.frame_state.lock().unwrap();
+                let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.all_owned_session_ids()
             };
             let child_auto_attach_locks = owned_sessions
@@ -41733,7 +41736,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                     setup_page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .mark_worker_auto_attach_requested();
                     for (child_session_id, auto_attach_lock) in child_auto_attach_locks {
                         let _auto_attach_guard = auto_attach_lock.lock().await;
@@ -41789,7 +41792,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                             page_for_task
                                 .frame_state
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .owns_frame_target(opener)
                         });
                     let parent_owned = info
@@ -41801,7 +41804,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                                 || page_for_task
                                     .frame_state
                                     .lock()
-                                    .unwrap()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                                     .owns_frame_target(parent)
                         });
                     if !opener_owned && !parent_owned {
@@ -41823,7 +41826,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                         let existing_session_id = page_for_task
                             .frame_state
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .worker_session_for_target(target_id);
                         if let Some(session_id) = existing_session_id {
                             workers.push(PyWorker {
@@ -41845,7 +41848,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                     )
                     .await
                     {
-                        let mut state = page_for_task.frame_state.lock().unwrap();
+                        let mut state = page_for_task.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         state.record_worker_session(&worker.session_id);
                         state.associate_worker_target_session(target_id, &worker.session_id);
                         workers.push(worker);
@@ -42206,7 +42209,7 @@ impl PyWorker {
                     let should_resume = page
                         .frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .prepare_worker_resume(&session_id);
                     if !should_resume {
                         return Ok(());
@@ -42231,7 +42234,7 @@ impl PyWorker {
         self.page.as_ref().is_some_and(|page| {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .claim_worker_resume_handoff(&self.session_id)
         })
     }
@@ -42239,7 +42242,7 @@ impl PyWorker {
         self.page.as_ref().is_some_and(|page| {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .mark_worker_capture_ready(&self.session_id)
         })
     }
@@ -42248,7 +42251,7 @@ impl PyWorker {
         self.page.as_ref().is_some_and(|page| {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .mark_worker_resume_handoff_failed(&self.session_id)
         })
     }
@@ -42638,7 +42641,7 @@ impl PyNetworkEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("network waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -42647,7 +42650,7 @@ impl PyNetworkEventWaiter {
         let kind = self.kind.clone();
         let requests = Arc::clone(&self.requests);
         let event_log = Arc::clone(&self.event_log);
-        let cursor = *self.cursor.lock().unwrap();
+        let cursor = *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let (result, receiver, cursor) = py.detach(move || {
             let (result, cursor) = browser.block_on_raw(wait_for_network_event(
@@ -42662,8 +42665,8 @@ impl PyNetworkEventWaiter {
             ));
             (result, receiver, cursor)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.cursor.lock().unwrap() = cursor;
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = cursor;
         result.map_err(py_err)
     }
 }
@@ -42671,7 +42674,7 @@ impl PyNetworkEventWaiter {
 #[cfg(feature = "python")]
 impl PyPageEventStream {
     fn take_pending_batch(&self) -> Option<PendingPageEventBatch> {
-        self.pending_batch.lock().unwrap().take()
+        self.pending_batch.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
     }
 
     fn rollback_pending_batch(&self) {
@@ -42734,7 +42737,7 @@ impl PyPageEventStream {
             ));
         }
         if self.closed.load(Ordering::SeqCst) {
-            let cursor = *self.cursor.lock().unwrap();
+            let cursor = *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             return Ok(
                 Value::Array(vec![page_event_envelope(cursor, "_closed", Value::Null)]).to_string(),
             );
@@ -42742,18 +42745,18 @@ impl PyPageEventStream {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("page event stream is already waiting"))?;
         let mut state = self
             .state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("page event stream is already waiting"))?;
         let browser = Arc::clone(&self.browser);
         let event_log = Arc::clone(&self.event_log);
-        let mut cursor = *self.cursor.lock().unwrap();
+        let mut cursor = *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let session_id = self.session_id.clone();
         let requests = Arc::clone(&self.requests);
         let page = Arc::clone(&self.page);
@@ -42776,9 +42779,9 @@ impl PyPageEventStream {
             ));
             (batch, cursor, state, terminal, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.cursor.lock().unwrap() = cursor;
-        *self.state.lock().unwrap() = Some(state);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = cursor;
+        *self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
         if terminal {
             self.closed.store(true, Ordering::SeqCst);
         }
@@ -42799,7 +42802,7 @@ impl PyPageEventStream {
             ));
         }
         if self.closed.load(Ordering::SeqCst) {
-            let cursor = *self.cursor.lock().unwrap();
+            let cursor = *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let payload =
                 Value::Array(vec![page_event_envelope(cursor, "_closed", Value::Null)]).to_string();
             let asyncio = PyModule::import(py, "asyncio")?;
@@ -42811,25 +42814,25 @@ impl PyPageEventStream {
         let receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("page event stream is already waiting"))?;
         let state = self
             .state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("page event stream is already waiting"))?;
         let browser = Arc::clone(&self.browser);
         let page = Arc::clone(&self.page);
         let runtime = browser.runtime.handle().clone();
         let event_log = Arc::clone(&self.event_log);
-        let cursor = *self.cursor.lock().unwrap();
+        let cursor = *self.cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let session_id = self.session_id.clone();
         let close_rx = self.close_tx.subscribe();
         let alive_rx = browser.client.alive_tx.subscribe();
         let timeout = BrowserInner::command_timeout(timeout_ms);
-        let working_requests = Arc::new(Mutex::new(self.requests.lock().unwrap().clone()));
+        let working_requests = Arc::new(Mutex::new(self.requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()));
         let mut lease = PageEventStreamLease {
             receiver: Some(receiver),
             rollback_state: Some(state.clone()),
@@ -42871,7 +42874,7 @@ impl PyPageEventStream {
                 Ok(PythonFutureOutput {
                     value,
                     on_delivered: Some(Box::new(move || {
-                        *pending_batch.lock().unwrap() = Some(PendingPageEventBatch {
+                        *pending_batch.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingPageEventBatch {
                             lease,
                             terminal,
                             closed,
@@ -42897,7 +42900,7 @@ impl PyRouteEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("route waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -42908,7 +42911,7 @@ impl PyRouteEventWaiter {
                 browser.block_on_raw(wait_for_route_event(&mut receiver, &session_id, timeout));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -42921,7 +42924,7 @@ impl PyAuthEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("auth waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -42932,7 +42935,7 @@ impl PyAuthEventWaiter {
                 browser.block_on_raw(wait_for_auth_event(&mut receiver, &session_id, timeout));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -42945,7 +42948,7 @@ impl PyDialogEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("dialog waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -42956,7 +42959,7 @@ impl PyDialogEventWaiter {
                 browser.block_on_raw(wait_for_dialog_event(&mut receiver, &session_id, timeout));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -42974,14 +42977,14 @@ impl PyConsoleEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("console waiter is already waiting"))?;
-        let mut page_state = self.page_state.lock().unwrap().take();
+        let mut page_state = self.page_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let browser = Arc::clone(&self.browser);
         let event_log = Arc::clone(&self.event_log);
         let session_id = self.session_id.clone();
-        let event_cursor = *self.event_cursor.lock().unwrap();
+        let event_cursor = *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let replay_until = self.replay_until.clone();
         let event_kind = self.event_kind.clone();
         let page = self.page.clone();
@@ -43004,9 +43007,9 @@ impl PyConsoleEventWaiter {
             ));
             (result, receiver, event_cursor, page_state)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.event_cursor.lock().unwrap() = event_cursor;
-        *self.page_state.lock().unwrap() = page_state;
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = event_cursor;
+        *self.page_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = page_state;
         result.0.map_err(py_err)
     }
 }
@@ -43046,7 +43049,7 @@ impl PyWebSocketEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("websocket waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -43064,7 +43067,7 @@ impl PyWebSocketEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43077,7 +43080,7 @@ impl PyBindingEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("binding waiter is already waiting"))?;
         let page = Arc::clone(&self.page);
@@ -43093,7 +43096,7 @@ impl PyBindingEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43106,10 +43109,10 @@ impl PyDownloadEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("download waiter is already waiting"))?;
-        let mut active_downloads = std::mem::take(&mut *self.active_downloads.lock().unwrap());
+        let mut active_downloads = std::mem::take(&mut *self.active_downloads.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         let browser = Arc::clone(&self.browser);
         let download_path = self.download_path.clone();
         let timeout = BrowserInner::command_timeout(timeout_ms);
@@ -43122,8 +43125,8 @@ impl PyDownloadEventWaiter {
             ));
             (result, receiver, active_downloads)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.active_downloads.lock().unwrap() = active_downloads;
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.active_downloads.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = active_downloads;
         result.map_err(py_err)
     }
 }
@@ -43136,7 +43139,7 @@ impl PyFileChooserEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("file chooser waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -43147,7 +43150,7 @@ impl PyFileChooserEventWaiter {
                 browser.block_on_raw(wait_for_file_chooser_event(&mut receiver, &page, timeout));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43160,7 +43163,7 @@ impl PyPopupEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("popup waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
@@ -43178,7 +43181,7 @@ impl PyPopupEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43191,13 +43194,13 @@ impl PyWorkerEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("worker waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
         let page = Arc::clone(&self.page);
         let event_log = Arc::clone(&self.event_log);
-        let event_cursor = *self.event_cursor.lock().unwrap();
+        let event_cursor = *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let (result, receiver, event_cursor) = py.detach(move || {
             let (result, event_cursor) = browser.block_on_raw(wait_for_worker(
@@ -43210,8 +43213,8 @@ impl PyWorkerEventWaiter {
             ));
             (result, receiver, event_cursor)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.event_cursor.lock().unwrap() = event_cursor;
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = event_cursor;
         result.map_err(py_err)
     }
 }
@@ -43224,12 +43227,12 @@ impl PyWorkerCloseEventWaiter {
         let mut receiver = self
             .receiver
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("worker close waiter is already waiting"))?;
         let browser = Arc::clone(&self.browser);
         let event_log = Arc::clone(&self.event_log);
-        let event_cursor = *self.event_cursor.lock().unwrap();
+        let event_cursor = *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_id = self.target_id.clone();
         let session_id = self.session_id.clone();
         let timeout = BrowserInner::command_timeout(timeout_ms);
@@ -43244,8 +43247,8 @@ impl PyWorkerCloseEventWaiter {
             ));
             (result, receiver, event_cursor)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
-        *self.event_cursor.lock().unwrap() = event_cursor;
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
+        *self.event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = event_cursor;
         result.map_err(py_err)
     }
 }
@@ -43256,7 +43259,7 @@ impl PyServiceWorkerEventWaiter {
     #[pyo3(signature = (timeout_ms=None))]
     fn wait(&self, py: Python<'_>, timeout_ms: Option<f64>) -> PyResult<PyWorker> {
         let mut receiver =
-            self.receiver.lock().unwrap().take().ok_or_else(|| {
+            self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take().ok_or_else(|| {
                 PyRuntimeError::new_err("service worker waiter is already waiting")
             })?;
         let browser = Arc::clone(&self.browser);
@@ -43272,7 +43275,7 @@ impl PyServiceWorkerEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43283,7 +43286,7 @@ impl PyBackgroundPageEventWaiter {
     #[pyo3(signature = (timeout_ms=None))]
     fn wait(&self, py: Python<'_>, timeout_ms: Option<f64>) -> PyResult<PyPage> {
         let mut receiver =
-            self.receiver.lock().unwrap().take().ok_or_else(|| {
+            self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take().ok_or_else(|| {
                 PyRuntimeError::new_err("background page waiter is already waiting")
             })?;
         let browser = Arc::clone(&self.browser);
@@ -43299,7 +43302,7 @@ impl PyBackgroundPageEventWaiter {
             ));
             (result, receiver)
         });
-        *self.receiver.lock().unwrap() = Some(receiver);
+        *self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receiver);
         result.map_err(py_err)
     }
 }
@@ -43350,7 +43353,7 @@ impl PyPage {
                     return Ok(Value::Null.to_string());
                 }
                 let navigation_frame_id = if wait_until == "commit" {
-                    page.main_frame_id.lock().unwrap().clone()
+                    page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
                 } else {
                     Some(
                         page.main_frame_id(&client, &session_id, deadline.remaining()?)
@@ -43451,7 +43454,7 @@ impl PyPage {
         let realm_identity = page
             .main_frame_id
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_deref()
             .map(|frame_id| format!("frame:{frame_id}"));
         let realm = client.serializer_realm_key(&session_id, realm_identity.as_deref());
@@ -44389,13 +44392,13 @@ pub struct RustwrightTargetLifecycleReceiver {
 
 impl RustwrightTargetLifecycleReceiver {
     pub fn recv_timeout(&self, timeout: Duration) -> Option<RustwrightTargetLifecycleEvent> {
-        self.receiver.lock().unwrap().recv_timeout(timeout).ok()
+        self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv_timeout(timeout).ok()
     }
 
     pub fn try_recv(
         &self,
     ) -> Result<Option<RustwrightTargetLifecycleEvent>, std::sync::mpsc::TryRecvError> {
-        match self.receiver.lock().unwrap().try_recv() {
+        match self.receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).try_recv() {
             Ok(event) => Ok(Some(event)),
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
             Err(error @ std::sync::mpsc::TryRecvError::Disconnected) => Err(error),
@@ -44470,7 +44473,7 @@ impl NativePageEventQueue {
     }
 
     fn push(&self, event: RustwrightPageEvent, terminal: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.events.len() == NATIVE_PAGE_EVENT_QUEUE_CAPACITY {
             state.events.pop_front();
             state.dropped = state.dropped.saturating_add(1);
@@ -44481,12 +44484,12 @@ impl NativePageEventQueue {
     }
 
     fn record_upstream_drop(&self, count: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.dropped = state.dropped.saturating_add(count);
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
         self.changed.notify_all();
     }
@@ -44524,7 +44527,7 @@ impl NativeNavigationDetailQueue {
     }
 
     fn push_sequenced(&self, sequence: u64, event: RustwrightNavigationDetail) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.latest_sequence = state.latest_sequence.max(sequence);
         if state.events.len() == NATIVE_PAGE_EVENT_QUEUE_CAPACITY {
             state.events.pop_front();
@@ -44535,12 +44538,12 @@ impl NativeNavigationDetailQueue {
     }
 
     fn record_upstream_drop(&self, count: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.dropped = state.dropped.saturating_add(count);
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
         self.changed.notify_all();
     }
@@ -44565,7 +44568,7 @@ impl RustwrightNavigationDetailReceiver {
         timeout: Duration,
     ) -> Option<(u64, RustwrightNavigationDetail)> {
         let deadline = Instant::now() + timeout;
-        let mut state = self.queue.state.lock().unwrap();
+        let mut state = self.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
             if let Some(event) = state.events.pop_front() {
                 return Some(event);
@@ -44577,7 +44580,7 @@ impl RustwrightNavigationDetailReceiver {
             if remaining.is_zero() {
                 return None;
             }
-            let (next, wait) = self.queue.changed.wait_timeout(state, remaining).unwrap();
+            let (next, wait) = self.queue.changed.wait_timeout(state, remaining).unwrap_or_else(|poisoned| poisoned.into_inner());
             state = next;
             if wait.timed_out() && state.events.is_empty() {
                 return None;
@@ -44586,7 +44589,7 @@ impl RustwrightNavigationDetailReceiver {
     }
 
     pub fn dropped_count(&self) -> u64 {
-        self.queue.state.lock().unwrap().dropped
+        self.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).dropped
     }
 
     #[doc(hidden)]
@@ -44595,7 +44598,7 @@ impl RustwrightNavigationDetailReceiver {
         // the forwarding task is scheduled.  Using that producer watermark
         // keeps a pre-operation event pre-boundary even when forwarding is
         // delayed until after the operation starts.
-        self.event_log.lock().unwrap().cursor()
+        self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cursor()
     }
 
     pub const fn capacity(&self) -> usize {
@@ -44613,7 +44616,7 @@ impl RustwrightPageEventReceiver {
     /// Wait for the next event, returning `None` on timeout or after terminal delivery.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<RustwrightPageEvent> {
         let deadline = Instant::now() + timeout;
-        let mut state = self.queue.state.lock().unwrap();
+        let mut state = self.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
             if let Some(event) = state.events.pop_front() {
                 return Some(event);
@@ -44625,7 +44628,7 @@ impl RustwrightPageEventReceiver {
             if remaining.is_zero() {
                 return None;
             }
-            let (next, wait) = self.queue.changed.wait_timeout(state, remaining).unwrap();
+            let (next, wait) = self.queue.changed.wait_timeout(state, remaining).unwrap_or_else(|poisoned| poisoned.into_inner());
             state = next;
             if wait.timed_out() && state.events.is_empty() {
                 return None;
@@ -44635,7 +44638,7 @@ impl RustwrightPageEventReceiver {
 
     /// Return the number of events discarded because a bounded queue lagged.
     pub fn dropped_count(&self) -> u64 {
-        self.queue.state.lock().unwrap().dropped
+        self.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).dropped
     }
 
     /// Return the fixed maximum number of typed events buffered by this receiver.
@@ -44903,7 +44906,7 @@ impl RustwrightPage {
         self.inner
             .default_timeouts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .general
             .page_default = timeout_ms.filter(|value| !value.is_nan());
     }
@@ -44913,7 +44916,7 @@ impl RustwrightPage {
         self.inner
             .default_timeouts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .navigation
             .page_default = timeout_ms.filter(|value| !value.is_nan());
     }
@@ -44923,7 +44926,7 @@ impl RustwrightPage {
         self.inner
             .default_timeouts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .general
             .context_default = timeout_ms.filter(|value| !value.is_nan());
     }
@@ -44933,7 +44936,7 @@ impl RustwrightPage {
         self.inner
             .default_timeouts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .navigation
             .context_default = timeout_ms.filter(|value| !value.is_nan());
     }
@@ -44942,7 +44945,7 @@ impl RustwrightPage {
         self.inner
             .default_timeouts
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .resolve(explicit, navigation)
     }
 
@@ -45024,7 +45027,7 @@ impl RustwrightPage {
                     break;
                 };
                 let (oldest_seq, entries) = {
-                    let log = event_log.lock().unwrap();
+                    let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     (log.oldest_seq(), log.entries_since(cursor))
                 };
                 if cursor < oldest_seq {
@@ -45071,7 +45074,7 @@ impl RustwrightPage {
             let records = page
                 .console_records
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .read(include_previous_navigations, clear);
             Ok(records)
         })
@@ -45107,7 +45110,7 @@ impl RustwrightPage {
         self.inner
             .native_network_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .read(include_previous_navigations, clear)
     }
 
@@ -45124,7 +45127,7 @@ impl RustwrightPage {
             .inner
             .native_network_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .body_ref(index);
         let Some(body_ref) = body_ref else {
             return Ok(RustwrightNetworkBody::Unavailable {
@@ -46294,7 +46297,7 @@ return waitForScrollSettle();
                     return Ok((false, Value::Null.to_string()));
                 }
                 let navigation_frame_id = if wait_until == "commit" {
-                    page.main_frame_id.lock().unwrap().clone()
+                    page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
                 } else {
                     Some(
                         page.main_frame_id(
@@ -46464,7 +46467,7 @@ fn native_page_event_from_cdp(
         }
         "Page.fileChooserOpened" => {
             let session_id = event_session_id?;
-            if !page.frame_state.lock().unwrap().owns_session(session_id) {
+            if !page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).owns_session(session_id) {
                 return None;
             }
             let backend_node_id = event
@@ -46495,7 +46498,7 @@ fn native_page_event_from_cdp(
         }
         "Page.navigatedWithinDocument" if event_session_id == Some(page.session_id.as_str()) => {
             let frame_id = event.pointer("/params/frameId").and_then(Value::as_str)?;
-            if page.main_frame_id.lock().unwrap().as_deref() != Some(frame_id) {
+            if page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref() != Some(frame_id) {
                 return None;
             }
             let url = event
@@ -46506,7 +46509,7 @@ fn native_page_event_from_cdp(
         }
         "Browser.downloadWillBegin" => {
             let frame_id = event.pointer("/params/frameId").and_then(Value::as_str)?;
-            if page.main_frame_id.lock().unwrap().as_deref() != Some(frame_id) {
+            if page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref() != Some(frame_id) {
                 return None;
             }
             Some((
@@ -46579,7 +46582,7 @@ fn native_navigation_detail_from_cdp(
         }
         "Page.navigatedWithinDocument" => {
             let frame_id = event.pointer("/params/frameId").and_then(Value::as_str)?;
-            if page.main_frame_id.lock().unwrap().as_deref() != Some(frame_id) {
+            if page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref() != Some(frame_id) {
                 return None;
             }
             Some(RustwrightNavigationDetail {
@@ -48351,7 +48354,7 @@ fn record_attached_iframe_session(
     target_name: Option<String>,
     target_url: Option<String>,
 ) -> FrameSessionPin {
-    let mut state = page.frame_state.lock().unwrap();
+    let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous_generation = state
         .session_pin_for_frame(frame_id)
         .map(|pin| pin.generation);
@@ -48381,7 +48384,7 @@ fn claim_manual_attached_iframe_session(
     target_url: Option<String>,
 ) -> Option<FrameSessionOwnershipClaim> {
     with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match state.claim_manual_session_for_frame(frame_id, child_session_id) {
             FrameSessionOwnershipClaim::Existing(pin) => FrameSessionOwnershipClaim::Existing(pin),
             FrameSessionOwnershipClaim::Claimed(pin) => {
@@ -48432,7 +48435,7 @@ fn register_attached_iframe_session_at_sequence(
     timeout: Duration,
 ) -> RwResult<Option<FrameSessionPin>> {
     let Some((session_pin, previous_generation)) = with_live_page_retention(&page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.owns_session(&parent_session_id)
             || !state.mark_frame_cache_dirty_at_sequence(&parent_session_id, event_sequence)
         {
@@ -48547,7 +48550,7 @@ async fn clear_console_capture_for_session(page: &PageInner, session_id: &str) {
     enabled_sessions.remove(session_id);
     page.console_replay_until_event_cursor
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(session_id);
 }
 
@@ -48557,10 +48560,10 @@ async fn register_page_owned_iframes_from_event_log(page: &PageInner) -> bool {
         .client
         .event_log
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entries_since(0);
     let Some((detached_sessions, unreplayable_sequence)) = with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut detached_sessions = Vec::new();
         let mut unreplayable_sequence = None;
         for (sequence, event) in events {
@@ -48641,7 +48644,7 @@ async fn register_page_owned_iframes_from_event_log(page: &PageInner) -> bool {
             .client
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finalize_console_replay_cutoff_on_detach(&session_id, cutoff);
         clear_console_capture_for_session(page, &session_id).await;
     }
@@ -48654,10 +48657,10 @@ async fn register_page_owned_workers_from_event_log(page: &PageInner) -> bool {
         .client
         .event_log
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entries_since(0);
     let Some((detached_sessions, unreplayable_sequence)) = with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut detached_sessions = Vec::new();
         let mut unreplayable_sequence = None;
         for (sequence, event) in events {
@@ -48723,7 +48726,7 @@ async fn register_page_owned_workers_from_event_log(page: &PageInner) -> bool {
             .client
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finalize_console_replay_cutoff_on_detach(&session_id, cutoff);
         clear_console_capture_for_session(page, &session_id).await;
     }
@@ -48750,7 +48753,7 @@ async fn enable_console_capture(
         ));
     }
     let sessions = {
-        let frame_state = page.frame_state.lock().unwrap();
+        let frame_state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut sessions = frame_state.all_owned_session_ids();
         sessions.extend(frame_state.worker_sessions.iter().cloned());
         sessions.into_iter().collect::<HashSet<_>>()
@@ -48818,11 +48821,11 @@ async fn enable_console_capture_for_session(
         .client
         .event_log
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .begin_console_replay_cutoff(session_id);
     page.console_replay_until_event_cursor
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(session_id.to_owned(), u64::MAX);
     drop(retention_guard);
     let replay_until = match page
@@ -48838,7 +48841,7 @@ async fn enable_console_capture_for_session(
                     .client
                     .event_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .finalize_console_replay_cutoff(session_id, cutoff_generation, cutoff);
                 cutoff
             }) else {
@@ -48850,13 +48853,13 @@ async fn enable_console_capture_for_session(
             let _ = with_live_page_retention(page, || {
                 page.console_replay_until_event_cursor
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(session_id);
                 page.browser
                     .client
                     .event_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .cancel_console_replay_cutoff(session_id, cutoff_generation);
             });
             return Err(error);
@@ -48865,7 +48868,7 @@ async fn enable_console_capture_for_session(
     if with_live_page_retention(page, || {
         page.console_replay_until_event_cursor
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id.to_owned(), replay_until);
     })
     .is_none()
@@ -48882,7 +48885,7 @@ async fn enable_console_capture_for_session(
         .await;
         if waited.is_err() {
             let _ = with_live_page_retention(page, || {
-                let mut replay_windows = page.console_replay_until_event_cursor.lock().unwrap();
+                let mut replay_windows = page.console_replay_until_event_cursor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if replay_windows.get(session_id) == Some(&replay_until) {
                     replay_windows.remove(session_id);
                 }
@@ -48922,7 +48925,7 @@ fn iframe_session_is_live(page: &PageInner, frame_id: &str, session_pin: &FrameS
         && page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .session_pin_still_owns_frame(frame_id, session_pin)
 }
 
@@ -48945,7 +48948,7 @@ fn spawn_attached_iframe_session_initialization(
     if page
         .frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .frame_session_errors
         .contains_key(&frame_id)
     {
@@ -48954,7 +48957,7 @@ fn spawn_attached_iframe_session_initialization(
     let generation = session_pin.generation;
     let permits = Arc::clone(&page.iframe_setup_tasks.permits);
     let weak_page = Arc::downgrade(page);
-    let mut handles = page.iframe_setup_tasks.handles.lock().unwrap();
+    let mut handles = page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if !iframe_session_is_live(page, &frame_id, &session_pin) || handles.contains_key(&generation) {
         return;
     }
@@ -48962,7 +48965,7 @@ fn spawn_attached_iframe_session_initialization(
         drop(handles);
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_frame_session_error_if_current(
                 &frame_id,
                 &session_pin,
@@ -49005,7 +49008,7 @@ fn spawn_attached_iframe_session_initialization(
                     .map(|page| {
                         page.frame_state
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .worker_auto_attach_requested()
                     })
                     .unwrap_or(false);
@@ -49050,7 +49053,7 @@ fn spawn_attached_iframe_session_initialization(
                         .map(|page| {
                             page.frame_state
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .worker_auto_attach_requested()
                         })
                         .unwrap_or(false);
@@ -49087,7 +49090,7 @@ fn spawn_attached_iframe_session_initialization(
                 }
                 page.frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .claim_iframe_session_setup(&frame_id, &session_pin)
             })
             .flatten() else {
@@ -49106,7 +49109,7 @@ fn spawn_attached_iframe_session_initialization(
                 if iframe_session_is_live(&page, &frame_id, &session_pin) {
                     page.frame_state
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .mark_iframe_session_ready(&frame_id, &session_pin);
                 }
             });
@@ -49115,7 +49118,7 @@ fn spawn_attached_iframe_session_initialization(
         .await;
 
         if let Some(page) = weak_page.upgrade() {
-            let mut handles = page.iframe_setup_tasks.handles.lock().unwrap();
+            let mut handles = page.iframe_setup_tasks.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if handles
                 .get(&generation)
                 .is_some_and(|entry| entry.token == token)
@@ -49128,7 +49131,7 @@ fn spawn_attached_iframe_session_initialization(
                     if iframe_session_is_live(&page, &frame_id, &session_pin) {
                         page.frame_state
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .record_frame_session_error_if_current(
                                 &frame_id,
                                 &session_pin,
@@ -49170,7 +49173,7 @@ async fn setup_attached_iframe_session(
         active_page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .mark_page_domain_enabled(child_session_id);
         true
     }) else {
@@ -49191,7 +49194,7 @@ async fn setup_attached_iframe_session(
         active_page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .mark_iframe_session_routable(&frame_id, &session_pin, focus_enqueued)
     }) else {
         return Err(RwError::Message(
@@ -49228,7 +49231,7 @@ async fn setup_attached_iframe_session_with_timeout(
     let client = Arc::clone(&page.browser.client);
     enable_page_iframe_auto_attach(&client, &child_session_id, timeout).await?;
     let pin = {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(pin) = state
             .session_pin_for_frame(&frame_id)
             .filter(|pin| pin.session_id == child_session_id)
@@ -49247,7 +49250,7 @@ async fn setup_attached_iframe_session_with_timeout(
     )
     .await?;
     {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.session_pin_still_owns_frame(&frame_id, &pin) {
             return Ok(());
         }
@@ -49268,7 +49271,7 @@ fn arm_recovered_attached_iframe_session(
     let session_pin = page
         .frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .session_pin_for_frame(&frame_id)
         .filter(|pin| pin.session_id == child_session_id);
     let Some(session_pin) = session_pin else {
@@ -49317,15 +49320,15 @@ fn initialize_page_frame_cache_tracking(
 ) {
     page.navigation_transition_lock
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .initialize(event_cursor);
     page.observation_event_cursor
         .store(event_cursor, Ordering::SeqCst);
     page.frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .set_frame_event_cursor(event_cursor);
-    let mut state = page.frame_state.lock().unwrap();
+    let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.mark_frame_event_listener_registered();
     state.mark_page_domain_enabled(page_session_id);
 }
@@ -49339,12 +49342,12 @@ fn cdp_event_sequence(event: &Value) -> Option<u64> {
 fn listener_sequence_has_gap(page: &PageInner, sequence: u64) -> bool {
     page.navigation_transition_lock
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .sequence_has_gap_before(sequence)
 }
 
 fn advance_contiguous_progress_after_live_event(page: &PageInner, sequence: u64) {
-    let mut navigation_transition = page.navigation_transition_lock.lock().unwrap();
+    let mut navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if navigation_transition.advance_live(sequence) {
         prune_page_navigation_epochs_to_contiguous_progress(page, &navigation_transition);
     }
@@ -49367,7 +49370,7 @@ fn spawn_page_oopif_event_listener(page: Weak<PageInner>) {
         .client
         .event_log
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .oldest_seq()
         > event_cursor;
     if replay_overflowed {
@@ -49410,7 +49413,7 @@ fn install_page_lifecycle_test_barrier(
     let (entered, entered_rx) = watch::channel(false);
     let (completed, completed_rx) = watch::channel(false);
     let released = Arc::new(tokio::sync::Notify::new());
-    page_lifecycle_test_barriers().lock().unwrap().insert(
+    page_lifecycle_test_barriers().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
         (Arc::as_ptr(page) as usize, child_session_id.to_string()),
         PageLifecycleTestBarrier {
             entered,
@@ -49429,7 +49432,7 @@ async fn wait_for_page_lifecycle_test_barrier(page: &PageInner, event: &Value) {
     let Some(child_session_id) = event.pointer("/params/sessionId").and_then(Value::as_str) else {
         return;
     };
-    let barrier = page_lifecycle_test_barriers().lock().unwrap().remove(&(
+    let barrier = page_lifecycle_test_barriers().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&(
         page as *const PageInner as usize,
         child_session_id.to_string(),
     ));
@@ -49462,7 +49465,7 @@ fn spawn_page_sequence_gated_event_listener(
                     if let Some(page) = page.upgrade() {
                         #[cfg(test)]
                         let replay_overflowed =
-                            page.browser.client.event_log.lock().unwrap().oldest_seq()
+                            page.browser.client.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).oldest_seq()
                                 > page.observation_event_cursor.load(Ordering::SeqCst);
                         reconcile_frame_cache_invalidations_after_lag(&page);
                         #[cfg(test)]
@@ -49509,7 +49512,7 @@ async fn reconcile_page_oopif_events_after_lag(
     event_cursor: &mut u64,
 ) -> RwResult<()> {
     let (replacement, replay, next_cursor, overflowed) = {
-        let event_log = page.browser.client.event_log.lock().unwrap();
+        let event_log = page.browser.client.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let replacement = page.browser.client.subscribe();
         let oldest_seq = event_log.oldest_seq();
         let overflowed = *event_cursor < oldest_seq;
@@ -49545,7 +49548,7 @@ async fn reconcile_page_frame_tree_authoritatively(page: &Arc<PageInner>) -> RwR
         match reconcile_page_frame_tree_authoritatively_once(page, Duration::from_millis(250)).await
         {
             Ok(true) => {
-                let mut state = page.frame_state.lock().unwrap();
+                let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let error_count = state.frame_session_errors.len();
                 state.frame_session_errors.retain(|_, error| {
                     !error.starts_with(OOPIF_OVERFLOW_RECONCILIATION_ERROR_PREFIX)
@@ -49575,7 +49578,7 @@ async fn reconcile_page_frame_tree_authoritatively(page: &Arc<PageInner>) -> RwR
         MAX_AUTHORITATIVE_OOPIF_RECONCILIATION_ATTEMPTS,
         last_error.unwrap_or_else(|| "unknown failure".to_string())
     );
-    let mut state = page.frame_state.lock().unwrap();
+    let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let frame_ids = state.frame_sessions.keys().cloned().collect::<Vec<_>>();
     let mut recorded_degradation = false;
     for frame_id in frame_ids {
@@ -49599,7 +49602,7 @@ async fn reconcile_page_frame_tree_authoritatively_once(
     timeout: Duration,
 ) -> RwResult<bool> {
     let (snapshot_generation, sessions) = {
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         (state.next_attachment_generation, state.session_ids())
     };
     let deadline = OperationDeadline::new(timeout);
@@ -49649,7 +49652,7 @@ async fn reconcile_page_frame_tree_authoritatively_once(
         .and_then(Value::as_str)
         .map(ToString::to_string);
 
-    let mut state = page.frame_state.lock().unwrap();
+    let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.next_attachment_generation != snapshot_generation {
         return Ok(false);
     }
@@ -49665,7 +49668,7 @@ async fn reconcile_page_frame_tree_authoritatively_once(
     removed_generations.extend(state.prune_frames_not_in(&authoritative_frame_ids));
     drop(state);
     if let Some(main_frame_id) = main_frame_id {
-        *page.main_frame_id.lock().unwrap() = Some(main_frame_id);
+        *page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(main_frame_id);
     }
     page.iframe_setup_tasks
         .abort_generations(removed_generations);
@@ -49842,7 +49845,7 @@ fn record_accepted_navigation_observation(
         .next_native_network_index
         .load(Ordering::SeqCst);
     let (transition, epoch) = {
-        let mut network = page.native_network_records.lock().unwrap();
+        let mut network = page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let transition = match observation {
             AcceptedNavigationObservation::Document { loader_id } => {
                 network.begin_document_navigation(loader_id.as_deref(), next_index, event_sequence)
@@ -49857,7 +49860,7 @@ fn record_accepted_navigation_observation(
         let accepted = page
             .console_records
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_navigation(event_sequence, epoch);
         debug_assert!(accepted);
         let _ = advanced;
@@ -49880,11 +49883,11 @@ fn prune_page_navigation_epochs_to_contiguous_progress(
     };
     page.native_network_records
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .prune_navigation_epochs_through(low_water_mark);
     page.console_records
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .prune_navigation_epochs_through(low_water_mark);
 }
 
@@ -49895,13 +49898,13 @@ async fn wait_for_worker_forwarding_capture(
     session_id: &str,
     timeout: Duration,
 ) -> bool {
-    let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+    let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_capture_ready_or_unclaimed(session_id)
         {
             return true;
@@ -49936,7 +49939,7 @@ async fn resume_worker_after_claim(
         .await
         .map(|_| ());
     let Some(result) = with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match result {
             Ok(()) => {
                 state.complete_worker_resume_handoff(session_id);
@@ -49974,7 +49977,7 @@ async fn worker_resume_watchdog_step(
             let pending = page
                 .frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .worker_resume_handoff_pending(session_id);
             if !pending || !worker_resume_page_is_live(page) || updates.changed().await.is_err() {
                 return;
@@ -49993,7 +49996,7 @@ async fn worker_resume_watchdog_step(
     let Some(should_resume) = with_live_page_retention(page, || {
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take_worker_resume_fallback(session_id)
     }) else {
         return false;
@@ -50006,7 +50009,7 @@ async fn worker_resume_watchdog_step(
 
 fn spawn_worker_resume_watchdog(page: Arc<PageInner>, session_id: String) {
     let weak_page = Arc::downgrade(&page);
-    let mut updates = page.frame_state.lock().unwrap().subscribe_session_updates();
+    let mut updates = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).subscribe_session_updates();
     tokio::spawn(async move {
         loop {
             let Some(page) = weak_page.upgrade() else {
@@ -50051,23 +50054,23 @@ fn reset_page_history_after_unreplayable(page: &PageInner, sequence: u64) {
 fn reset_page_history_after_unreplayable_locked(page: &PageInner, sequence: u64) {
     page.network_requests
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .reset_after_overflow(sequence.saturating_add(1));
     page.native_network_records
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .reset_after_unreplayable();
     page.console_records
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .reset_after_unreplayable();
     page.console_replay_until_event_cursor
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
     page.frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .mark_all_frame_caches_dirty();
 }
 async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
@@ -50141,7 +50144,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
         if !page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .owns_session(parent_session_id)
         {
             return;
@@ -50157,7 +50160,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             .unwrap_or("");
         if target_type == "worker" {
             let Some(accepted) = with_live_page_retention(&page, || {
-                let mut state = page.frame_state.lock().unwrap();
+                let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(target_id) = target_info.get("targetId").and_then(Value::as_str) {
                     state.record_worker_target_session_at_sequence(
                         target_id,
@@ -50181,7 +50184,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             }
             let child_session_id = child_session_id.to_string();
             let Some(resume_without_consumer) = with_live_page_retention(&page, || {
-                let mut state = page.frame_state.lock().unwrap();
+                let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.arm_worker_resume_handoff(&child_session_id, event_sequence);
                 !state.worker_event_interest()
                     && state.take_worker_resume_fallback(&child_session_id)
@@ -50244,7 +50247,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             Duration::from_secs(5),
         ) {
             let _ = with_live_page_retention(&page, || {
-                let mut state = page.frame_state.lock().unwrap();
+                let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if pin.session_id == child_session_id
                     && state.session_pin_still_owns_frame(frame_id, &pin)
                 {
@@ -50255,7 +50258,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
         if page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .worker_auto_attach_requested()
         {
             let client = Arc::clone(&page.browser.client);
@@ -50280,7 +50283,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             return;
         };
         let Some((worker_detached, generations)) = with_live_page_retention(&page, || {
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let worker_detached =
                 state.remove_worker_session_at_sequence(detached_session_id, event_sequence);
             let generations = state.setup_generations_for_session(detached_session_id);
@@ -50293,7 +50296,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             .client
             .event_log
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finalize_console_replay_cutoff_on_detach(detached_session_id, event_sequence);
         if worker_detached {
             clear_console_capture_for_session(&page, detached_session_id).await;
@@ -50306,7 +50309,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
         return;
     };
     let event_session_is_relevant = {
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.owns_session(event_session_id)
             || (method == "Page.frameDetached"
                 && state.session_is_pending_swap_loser(event_session_id))
@@ -50324,7 +50327,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
                 .get("parentFrameId")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.mark_frame_cache_dirty_at_sequence(event_session_id, event_sequence) {
                 state.record_frame(
                     frame_id.to_string(),
@@ -50337,9 +50340,9 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             None
         }
         "Page.frameNavigated" => {
-            let _navigation_transition = page.navigation_transition_lock.lock().unwrap();
-            let mut main_frame_id = page.main_frame_id.lock().unwrap();
-            let mut state = page.frame_state.lock().unwrap();
+            let _navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut main_frame_id = page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             apply_accepted_frame_navigation_transition(
                 &mut state,
                 &mut main_frame_id,
@@ -50351,9 +50354,9 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             )
         }
         "Page.navigatedWithinDocument" => {
-            let _navigation_transition = page.navigation_transition_lock.lock().unwrap();
-            let main_frame_id = page.main_frame_id.lock().unwrap();
-            let mut state = page.frame_state.lock().unwrap();
+            let _navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let main_frame_id = page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             apply_accepted_same_document_navigation_transition(
                 &mut state,
                 &main_frame_id,
@@ -50365,7 +50368,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
         }
         "Page.frameDetached" => {
             let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
-            let mut state = page.frame_state.lock().unwrap();
+            let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.mark_frame_cache_dirty_at_sequence(event_session_id, event_sequence) {
                 if let Some(frame_id) = params.get("frameId").and_then(Value::as_str) {
                     let removed_generations = if reason == "swap" {
@@ -50387,7 +50390,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
             if let Some(context_id) = params.get("executionContextId") {
                 page.frame_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .invalidate_execution_context(event_session_id, context_id);
             }
             None
@@ -50395,7 +50398,7 @@ async fn handle_page_oopif_event(page: Arc<PageInner>, event: Value) {
         "Runtime.executionContextsCleared" => {
             page.frame_state
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .invalidate_execution_contexts_for_session(event_session_id);
             None
         }
@@ -50438,7 +50441,7 @@ fn record_page_observation_event_with_ownership(
         .and_then(|session_id| {
             page.console_replay_until_event_cursor
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .get(session_id)
                 .copied()
         })
@@ -50450,7 +50453,7 @@ fn record_page_observation_event_with_ownership(
     let is_main_session = event_session_id == Some(page.session_id.as_str());
     let owned_session = replay_owned_session.unwrap_or_else(|| {
         event_session_id
-            .is_some_and(|session_id| page.frame_state.lock().unwrap().owns_session(session_id))
+            .is_some_and(|session_id| page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).owns_session(session_id))
     });
     let next_index = page
         .browser
@@ -50474,14 +50477,14 @@ fn record_page_observation_event_with_ownership(
     };
     let mut accepted_document_navigation_epoch = None;
     if let Some((frame_id, loader_id)) = main_document {
-        let _navigation_transition = page.navigation_transition_lock.lock().unwrap();
-        let main_frame_id = page.main_frame_id.lock().unwrap().clone();
+        let _navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let main_frame_id = page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         if main_frame_id
             .as_deref()
             .map_or(true, |main| main == frame_id)
         {
             let (transition, epoch) = {
-                let mut network = page.native_network_records.lock().unwrap();
+                let mut network = page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let transition =
                     network.begin_document_navigation(loader_id, next_index, event_sequence);
                 (transition, network.navigation_epoch)
@@ -50490,7 +50493,7 @@ fn record_page_observation_event_with_ownership(
                 let accepted = page
                     .console_records
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .record_navigation(event_sequence, epoch);
                 debug_assert!(accepted);
                 accepted_document_navigation_epoch = Some(epoch);
@@ -50503,7 +50506,7 @@ fn record_page_observation_event_with_ownership(
         && page.console_capture.requested.load(Ordering::SeqCst)
     {
         if let Some(record) = native_console_record_from_event(event) {
-            let mut console = page.console_records.lock().unwrap();
+            let mut console = page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if capture_baseline_replay {
                 console.push_capture_baseline(record);
             } else {
@@ -50524,7 +50527,7 @@ fn record_page_observation_event_with_ownership(
     let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
         return;
     };
-    let mut network = page.native_network_records.lock().unwrap();
+    let mut network = page.native_network_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     match method {
         "Network.requestWillBeSent" => {
             if let Some(response) = params.get("redirectResponse") {
@@ -50891,7 +50894,7 @@ mod native_console_record_tests {
         })
         .await
         .expect("listener must establish a nonzero event cursor");
-        assert_eq!(page.console_records.lock().unwrap().navigation_epoch, 1);
+        assert_eq!(page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).navigation_epoch, 1);
 
         enable_console_capture_for_session_if_requested(
             &page,
@@ -50937,7 +50940,7 @@ mod native_console_record_tests {
 
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_session_for_frame("late-iframe-frame", "late-iframe-session");
 
         let respond_late_iframe = async {
@@ -51025,7 +51028,7 @@ mod native_console_record_tests {
         .await
         .expect("listener must consume the post-window record");
 
-        let all = page.console_records.lock().unwrap().read(true, false);
+        let all = page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).read(true, false);
         assert_eq!(
             all.records
                 .iter()
@@ -51038,7 +51041,7 @@ mod native_console_record_tests {
                 ("iframe after replay window", 2),
             ]
         );
-        let current = page.console_records.lock().unwrap().read(false, false);
+        let current = page.console_records.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).read(false, false);
         assert_eq!(
             current
                 .records
@@ -51546,13 +51549,13 @@ fn reconcile_frame_cache_invalidations_impl_with_hook(
     if page.lifecycle.is_closing_or_closed() || page.target_closed.load(Ordering::SeqCst) {
         return;
     }
-    let mut navigation_transition = page.navigation_transition_lock.lock().unwrap();
+    let mut navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Global page cache lock order: event_log -> main_frame_id -> frame_state.
     let (reconciliation, unknown_gap_boundary) = {
-        let log = page.browser.client.event_log.lock().unwrap();
+        let log = page.browser.client.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         replay_started();
-        let mut main_frame_id = page.main_frame_id.lock().unwrap();
-        let mut state = page.frame_state.lock().unwrap();
+        let mut main_frame_id = page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let oldest_sequence = log.oldest_seq();
         let mut unknown_gap_boundary = navigation_transition
             .has_unreplayable_gap(oldest_sequence)
@@ -51713,7 +51716,7 @@ async fn refresh_frame_tree_session_locked(
     timeout: Duration,
 ) -> RwResult<()> {
     let Some((registered_root, ownership_generation, registered_root_sessions)) = ({
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state
             .refresh_registration(session_id)
             .map(|(registered_root, ownership_generation)| {
@@ -51757,11 +51760,11 @@ async fn refresh_frame_tree_session_locked(
         return Ok(());
     }
     let root_frame_id = tree.root_frame_id.clone();
-    let navigation_transition = page.navigation_transition_lock.lock().unwrap();
+    let navigation_transition = page.navigation_transition_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (reconciliation, authoritative_effects) = {
-        let event_log = page.browser.client.event_log.lock().unwrap();
-        let mut main_frame_id = page.main_frame_id.lock().unwrap();
-        let mut state = page.frame_state.lock().unwrap();
+        let event_log = page.browser.client.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut main_frame_id = page.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let reconciliation = reconcile_frame_cache_invalidations_locked(
             &mut state,
             &mut main_frame_id,
@@ -51821,7 +51824,7 @@ async fn ensure_frame_tree_session_after_reconcile(
     command_timeout_cap: Duration,
 ) -> RwResult<()> {
     let refresh_lock = {
-        let state = page.frame_state.lock().unwrap();
+        let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.frame_cache_refresh_generation(session_id).is_none() {
             return Ok(());
         }
@@ -51835,7 +51838,7 @@ async fn ensure_frame_tree_session_after_reconcile(
     let generation = page
         .frame_state
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .frame_cache_refresh_generation(session_id);
     let Some(generation) = generation else {
         return Ok(());
@@ -51852,16 +51855,16 @@ async fn ensure_frame_tree_session_after_reconcile(
 async fn refresh_page_frame_tree(page: &Arc<PageInner>, timeout: Duration) -> RwResult<()> {
     reconcile_frame_cache_invalidations(page);
     let deadline = OperationDeadline::new(timeout);
-    let refresh_lock = Arc::clone(&page.frame_state.lock().unwrap().frame_tree_refresh_lock);
+    let refresh_lock = Arc::clone(&page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).frame_tree_refresh_lock);
     let _refresh_guard = tokio::time::timeout(deadline.remaining()?, refresh_lock.lock_owned())
         .await
         .map_err(|_| RwError::Timeout(timeout.as_millis().min(u128::from(u64::MAX)) as u64))?;
-    let sessions = page.frame_state.lock().unwrap().session_ids();
+    let sessions = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).session_ids();
     for session_id in sessions {
         let generation = page
             .frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_cache_refresh_generation(&session_id);
         let Some(generation) = generation else {
             continue;
@@ -51873,7 +51876,7 @@ async fn refresh_page_frame_tree(page: &Arc<PageInner>, timeout: Duration) -> Rw
 }
 
 async fn install_stealth_defaults(browser: &BrowserInner, session_id: &str) -> RwResult<()> {
-    let cached_override = browser.stealth_user_agent_override.lock().unwrap().clone();
+    let cached_override = browser.stealth_user_agent_override.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
     let user_agent_override = if let Some(cached_override) = cached_override {
         cached_override
     } else {
@@ -51900,7 +51903,7 @@ async fn install_stealth_defaults(browser: &BrowserInner, session_id: &str) -> R
                 })
             })
             .unwrap_or(Value::Null);
-        *browser.stealth_user_agent_override.lock().unwrap() = Some(override_value.clone());
+        *browser.stealth_user_agent_override.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(override_value.clone());
         override_value
     };
     if !user_agent_override.is_null() {
@@ -52653,6 +52656,9 @@ impl ChromiumPipeFds {
     fn into_parent_files(self) -> (fs::File, fs::File) {
         close_raw_fd(self.child_read);
         close_raw_fd(self.child_write);
+        // SAFETY: `parent_read`/`parent_write` are live pipe ends from
+        // `create_pipe_pair` that this method uniquely consumes. Ownership
+        // transfers into `File`; the child ends were closed above.
         let read = unsafe { fs::File::from_raw_fd(self.parent_read) };
         let write = unsafe { fs::File::from_raw_fd(self.parent_write) };
         (read, write)
@@ -52662,6 +52668,8 @@ impl ChromiumPipeFds {
 #[cfg(unix)]
 fn close_raw_fd(fd: RawFd) {
     if fd >= 0 {
+        // SAFETY: `fd` is either a valid descriptor owned by this process or
+        // the sentinel -1 filtered above. close is async-signal-safe.
         unsafe {
             libc::close(fd);
         }
@@ -52671,6 +52679,8 @@ fn close_raw_fd(fd: RawFd) {
 #[cfg(unix)]
 fn create_pipe_pair() -> RwResult<[RawFd; 2]> {
     let mut fds = [-1, -1];
+    // SAFETY: `fds` is a writable [c_int; 2] as required by pipe(2). On success
+    // both slots receive open descriptors owned by this process.
     let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if result == -1 {
         return Err(RwError::Io(std::io::Error::last_os_error()));
@@ -52699,6 +52709,8 @@ fn create_chromium_pipe_fds() -> RwResult<ChromiumPipeFds> {
 
 #[cfg(unix)]
 fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> std::io::Result<RawFd> {
+    // SAFETY: `fd` is an open descriptor; F_DUPFD duplicates it to the lowest
+    // available fd >= minimum without closing the original.
     let result = unsafe { libc::fcntl(fd, libc::F_DUPFD, minimum) };
     if result == -1 {
         Err(std::io::Error::last_os_error())
@@ -52725,6 +52737,8 @@ fn install_chromium_pipe_fds(
         write_fd = duplicate_fd_at_or_above(write_fd, 5)?;
         duplicated.push(write_fd);
     }
+    // SAFETY: `read_fd`/`write_fd` are open descriptors; dup2 copies them onto
+    // the fixed Chromium pipe slots 3 and 4, closing any previous occupant.
     if unsafe { libc::dup2(read_fd, 3) } == -1 {
         return Err(std::io::Error::last_os_error());
     }
@@ -53052,6 +53066,9 @@ fn launch_chromium_attempt(
         let child_write = pipes.child_write;
         let parent_read = pipes.parent_read;
         let parent_write = pipes.parent_write;
+        // SAFETY: pre_exec runs in the child after fork and before exec. The
+        // closure only touches the pipe fds captured by value and calls
+        // async-signal-safe dup2/close helpers; it does not allocate or take locks.
         unsafe {
             command.pre_exec(move || {
                 install_chromium_pipe_fds(child_read, child_write, parent_read, parent_write)
@@ -53979,16 +53996,16 @@ fn process_network_observation_event(
     if is_unreplayable_cdp_event(event) {
         requests
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .reset_after_overflow(seq.saturating_add(1));
         *state = NetworkObservationState::new();
         return Err(1);
     }
     let request_payload = {
-        let mut requests = requests.lock().unwrap();
+        let mut requests = requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if seq > requests.next_applied_seq {
             let (oldest_seq, entries) = {
-                let log = event_log.lock().unwrap();
+                let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 (
                     log.oldest_seq(),
                     log.entries_since(requests.next_applied_seq),
@@ -54190,7 +54207,7 @@ fn process_page_observation_event_with_page(
         } else {
             requests
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .reset_after_overflow(seq.saturating_add(1));
             state.reset_after_overflow();
         }
@@ -54366,7 +54383,7 @@ async fn wait_for_page_event_batch(
             .min(PAGE_EVENT_LOG_SCAN_CHUNK)
             .max(1);
         let (oldest_seq, entries) = {
-            let log = event_log.lock().unwrap();
+            let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 log.oldest_seq(),
                 log.entries_since_limited(*cursor, raw_limit),
@@ -54378,7 +54395,7 @@ async fn wait_for_page_event_batch(
             let Some(()) = with_live_page_retention(page, || {
                 *cursor = oldest_seq;
                 *state = PageEventStreamState::for_page(page);
-                requests.lock().unwrap().reset_after_overflow(oldest_seq);
+                requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reset_after_overflow(oldest_seq);
             }) else {
                 batch.push(page_event_envelope(*cursor, "_closed", Value::Null));
                 return (batch, true);
@@ -54509,13 +54526,13 @@ async fn wait_for_network_event(
             }
         }
         let (oldest_seq, entries) = {
-            let log = event_log.lock().unwrap();
+            let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (log.oldest_seq(), log.entries_since(cursor))
         };
         if cursor < oldest_seq {
             let dropped = oldest_seq - cursor;
             if with_live_page_retention(&page, || {
-                requests.lock().unwrap().reset_after_overflow(oldest_seq);
+                requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).reset_after_overflow(oldest_seq);
             })
             .is_none()
             {
@@ -54860,7 +54877,7 @@ fn page_worker_session_from_attachment(page: &PageInner, event: &Value) -> Optio
     }
     let child_session_id = event.pointer("/params/sessionId").and_then(Value::as_str)?;
     with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.owns_session(parent_session_id) {
             return None;
         }
@@ -54895,7 +54912,7 @@ fn remove_page_worker_session_from_detachment(page: &PageInner, event: &Value) -
     let accepted = with_live_page_retention(page, || {
         page.frame_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove_worker_session_at_sequence(session_id, cdp_event_sequence(event))
     })?;
     accepted.then(|| session_id.to_string())
@@ -54979,7 +54996,7 @@ async fn process_console_wait_event(
                         let _ = with_live_page_retention(&page, || {
                             page.frame_state
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .mark_worker_resume_handoff_failed(&child_session_id);
                         });
                         return;
@@ -54999,7 +55016,7 @@ async fn process_console_wait_event(
                     .client
                     .event_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .finalize_console_replay_cutoff_on_detach(&detached_session_id, event_sequence);
                 clear_console_capture_for_session(page, &detached_session_id).await;
             }
@@ -55013,7 +55030,7 @@ async fn process_console_wait_event(
                 let owns_page_session = page_state
                     .as_ref()
                     .is_none_or(|state| state.owns_session(event_session_id));
-                let state = page.frame_state.lock().unwrap();
+                let state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 owns_page_session
                     || (event_kind == "console" && state.owns_worker_session(event_session_id))
             })
@@ -55125,7 +55142,7 @@ async fn wait_for_console_event(
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 let (replacement, oldest_seq, replay) = {
-                    let log = event_log.lock().unwrap();
+                    let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     let replacement = browser.client.subscribe();
                     let oldest_seq = log.oldest_seq();
                     let replay = log.entries_since(event_cursor.max(oldest_seq));
@@ -55269,7 +55286,7 @@ async fn wait_for_binding_event_for_page(
                 let matches_session = event
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .map(|value| page.frame_state.lock().unwrap().owns_session(value))
+                    .map(|value| page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).owns_session(value))
                     .unwrap_or(false);
                 if !matches_session {
                     continue;
@@ -55367,7 +55384,7 @@ async fn wait_for_file_chooser_event(
                 let matches_session = event
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .map(|session_id| page.frame_state.lock().unwrap().owns_session(session_id))
+                    .map(|session_id| page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).owns_session(session_id))
                     .unwrap_or(false);
                 if !matches_session {
                     continue;
@@ -55425,7 +55442,7 @@ async fn wait_for_popup_page(
                         RwError::Message("popup target did not include targetId".to_string())
                     })?
                     .to_string();
-                if !seen_target_ids.lock().unwrap().insert(target_id.clone()) {
+                if !seen_target_ids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(target_id.clone()) {
                     continue;
                 }
                 let context_id = info
@@ -55437,7 +55454,7 @@ async fn wait_for_popup_page(
                 {
                     Ok(inner) => Ok(PyPage { inner }),
                     Err(error) => {
-                        seen_target_ids.lock().unwrap().remove(&target_id);
+                        seen_target_ids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&target_id);
                         Err(error)
                     }
                 };
@@ -55805,7 +55822,7 @@ fn worker_from_attachment_event(
         .to_string();
     let event_sequence = cdp_event_sequence(event);
     let Some(()) = with_live_page_retention(page, || {
-        let mut state = page.frame_state.lock().unwrap();
+        let mut state = page.frame_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.owns_session(parent_session_id)
             || !state.record_worker_target_session_at_sequence(
                 &target_id,
@@ -55854,7 +55871,7 @@ async fn wait_for_worker(
             );
         }
         let (oldest_seq, entries) = {
-            let log = event_log.lock().unwrap();
+            let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 log.oldest_seq(),
                 log.entries_since_limited(event_cursor, PAGE_EVENT_LOG_SCAN_CHUNK),
@@ -55900,7 +55917,7 @@ async fn wait_for_worker(
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                 let (replacement, oldest_seq) = {
-                    let log = event_log.lock().unwrap();
+                    let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     (browser.client.subscribe(), log.oldest_seq())
                 };
                 *events = replacement;
@@ -56054,7 +56071,7 @@ async fn wait_for_worker_close(
             );
         }
         let (oldest_seq, entries) = {
-            let log = event_log.lock().unwrap();
+            let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 log.oldest_seq(),
                 log.entries_since_limited(event_cursor, PAGE_EVENT_LOG_SCAN_CHUNK),
@@ -56130,7 +56147,7 @@ async fn wait_for_worker_close(
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                 let (replacement, oldest_seq) = {
-                    let log = event_log.lock().unwrap();
+                    let log = event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     (events.resubscribe(), log.oldest_seq())
                 };
                 *events = replacement;
@@ -56386,7 +56403,7 @@ fn response_from_event(
         .and_then(|id| {
             requests
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .requests
                 .get(id)
                 .map(|entry| entry.current.request.clone())
@@ -56462,7 +56479,7 @@ fn request_lifecycle_from_event(
         .and_then(|id| {
             requests
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .requests
                 .get(id)
                 .map(|entry| entry.current.request.clone())
@@ -57040,7 +57057,7 @@ async fn wait_for_navigation(
                 replay_cursor = client
                     .event_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .cursor_after_event(replay_cursor, &event);
                 let event_log_position = (replay_cursor != previous_replay_cursor)
                     .then(|| replay_cursor.wrapping_sub(1));
@@ -57066,7 +57083,7 @@ async fn wait_for_navigation(
                 let replayed_events = client
                     .event_log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .entries_between(replay_cursor, replay_end);
                 *events = replacement;
                 replay_cursor = replay_end;
