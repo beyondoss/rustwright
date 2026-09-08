@@ -36,8 +36,8 @@ Read `$ARGUMENTS` for an exact SemVer version and an optional mode.
 
 ## 1. Inspect current state
 
-1. Read `AGENTS.md` and `docs/RELEASING.md`; repository instructions and the
-   current workflows override examples in this skill.
+1. Read `docs/RELEASING.md`; the current release workflows override examples
+   in this skill.
 2. Require a clean worktree. Never discard local changes.
 3. Fetch `origin/main` and all tags. Start from the current `origin/main`, not a
    stale local branch.
@@ -125,8 +125,7 @@ Do not weaken, skip, or silently narrow a failing check.
 
 1. Review the complete diff and staged diff for accidental disclosures.
 2. Commit only the nine expected version files listed above. Use the
-   authenticated GitHub account's
-   public `users.noreply.github.com` identity as required by `AGENTS.md`.
+   authenticated GitHub account's public `users.noreply.github.com` identity.
 3. Install the tracked pre-push hook with `python3 tools/install_hooks.py`.
 4. Push the release branch without bypassing hooks and open a PR titled
    `chore(release): bump version to <version>`.
