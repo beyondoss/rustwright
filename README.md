@@ -1,7 +1,8 @@
 **A Rust rewrite of Playwright's browser engine**, speaking raw
 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
-in-process — **[~4× smaller client memory than playwright-python](#benchmarks)**
-(no Node driver), with no Playwright automation fingerprint. Alpha; Chromium-only.
+in-process — **[~27× less MCP server memory than Playwright MCP](#benchmarks)**
+(about **5 MB vs 135 MB** process RSS), with no Playwright automation fingerprint.
+Alpha; Chromium-only.
 
 This repository ships **native binaries** (CLI + MCP) as GitHub Release assets.
 It does **not** publish to PyPI, npm, or other language registries.
@@ -139,15 +140,20 @@ Local fingerprint runs — default Playwright failed webdriver/headless checks t
 
 ## Benchmarks
 
-Rustwright's **client** footprint is about **4× smaller** than
-playwright-python's: median peak PSS **28 MB vs 110 MB (−75%)** on a remote-CDP
-form-fill suite (Chromium off-box; smaller in every case). playwright-python
-pays for a bundled Node driver; Rustwright speaks CDP in-process, so that cost
-is gone. With a local Chromium, whole-process memory is still browser-dominated
-and roughly comparable.
+On the same host-safe MCP protocol workload (`initialize` + `tools/list`, no
+Chromium launched), **rustwright-mcp** used about **27× less** process memory
+than **@playwright/mcp**:
 
-Details: [`benchmarks/form_fill/RESULTS.md`](benchmarks/form_fill/RESULTS.md).
-Methodology: [`BENCHMARK.md`](BENCHMARK.md).
+| MCP server | Median process VmRSS |
+|---|---:|
+| `rustwright-mcp` | **5.0 MiB** |
+| `@playwright/mcp` 0.0.80 | **135.2 MiB** |
+
+That is the MCP server process only (not the browser). Chromium still dominates
+end-to-end RSS when a page is open; the win is the automation side-car you keep
+alive next to the agent.
+
+Reproduce: `tools/compare_mcp_rss.py`. Notes: [`MEMORY_BENCH.md`](MEMORY_BENCH.md).
 
 ## Alternatives
 
