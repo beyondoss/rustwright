@@ -6791,6 +6791,63 @@ multiline-compatible = """4.5.6"""
     }
 
     #[test]
+    fn actionability_probe_body_is_parameterized_without_format_assembly() {
+        let body = actionability_probe_body(true, Some(12.5), None);
+        assert!(body.contains("const strict = true;"));
+        assert!(body.contains("const positionX = 12.5;"));
+        assert!(body.contains("const positionY = null;"));
+        assert!(!body.contains("__STRICT__"));
+        assert!(!body.contains("__POSITION_X__"));
+        assert!(!body.contains("__POSITION_Y__"));
+        assert!(ACTIONABILITY_PROBE_BODY.contains("__STRICT__"));
+    }
+
+    #[test]
+    fn actionability_poll_backoff_doubles_while_state_is_unchanged() {
+        assert_eq!(
+            next_actionability_poll_interval(Duration::from_millis(10), false),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            next_actionability_poll_interval(Duration::from_millis(10), true),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            next_actionability_poll_interval(Duration::from_millis(80), true),
+            Duration::from_millis(100)
+        );
+        let left = ActionabilityState {
+            count: 1,
+            strict_violation: false,
+            attached: true,
+            visible: false,
+            enabled: true,
+            stable: false,
+            receives_events: false,
+            point_x: Some(10.4),
+            point_y: Some(20.4),
+            rect_x: Some(1.2),
+            rect_y: Some(3.7),
+        };
+        let right = ActionabilityState {
+            point_x: Some(10.1),
+            point_y: Some(20.2),
+            rect_x: Some(1.4),
+            rect_y: Some(3.9),
+            ..left
+        };
+        assert_eq!(
+            actionability_progress_key(&left),
+            actionability_progress_key(&right)
+        );
+        assert!(ascii_contains_ignore_case(
+            "Could Not Find Object",
+            "could not find object"
+        ));
+        assert!(!ascii_contains_ignore_case("attached", "detached"));
+    }
+
+    #[test]
     fn hit_tested_point_translation_preserves_clamping_and_frame_offsets() {
         let partially_offscreen = HitTestedLocatorPoint {
             point: ActionabilityPoint { x: 0.0, y: 142.0 },
@@ -11498,8 +11555,7 @@ target.scrollIntoView = () => {
   target.dataset.mainWorldOverride = "observed";
 };
 true
-"##
-                .to_string(),
+"##,
                 Duration::from_millis(500),
             )
             .await
@@ -16251,7 +16307,7 @@ return this.dataset.mainWorldOverride === "observed";
         let evaluation = evaluate_locator_resolution(
             &page,
             &resolution,
-            "true".to_string(),
+            "true",
             OperationDeadline::new(Duration::from_millis(500)),
             Duration::ZERO,
         );
@@ -21714,7 +21770,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                make_evaluate_expression("0", None),
+                &make_evaluate_expression("0", None),
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -21752,7 +21808,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                "({ answer: 42 })".to_string(),
+                "({ answer: 42 })",
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -21811,7 +21867,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                make_evaluate_expression("1", None),
+                &make_evaluate_expression("1", None),
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -21936,7 +21992,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                expression,
+                &expression,
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -22181,7 +22237,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &evaluate_client,
                 "page-session",
                 Some("frame:main"),
-                make_evaluate_expression("globalThis.beaconCount += 1", None),
+                &make_evaluate_expression("globalThis.beaconCount += 1", None),
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -22221,7 +22277,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                make_evaluate_expression("1", None),
+                &make_evaluate_expression("1", None),
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -22253,7 +22309,7 @@ return this.dataset.mainWorldOverride === "observed";
                 &client,
                 "page-session",
                 None,
-                make_evaluate_expression("2", None),
+                &make_evaluate_expression("2", None),
                 OperationDeadline::new(Duration::from_secs(1)),
             )
             .await
@@ -32270,7 +32326,7 @@ fn evaluate_locator_wait_probe_for_page(
                     &page.browser.client,
                     &page.session_id,
                     realm_identity.as_deref(),
-                    expression,
+                    &expression,
                     deadline,
                 )
                 .await
@@ -32295,7 +32351,7 @@ async fn evaluate_expression_for_page_async(
         &page.browser.client,
         &page.session_id,
         realm_identity.as_deref(),
-        expression,
+        &expression,
         timeout,
     )
     .await
@@ -32342,7 +32398,7 @@ impl OperationDeadline {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 struct ActionabilityState {
     count: usize,
     strict_violation: bool,
@@ -32397,21 +32453,15 @@ impl PhysicalPointerAction {
     }
 }
 
-fn actionability_probe_body(
-    strict: bool,
-    position_x: Option<f64>,
-    position_y: Option<f64>,
-) -> String {
-    let strict = if strict { "true" } else { "false" };
-    let position_x = position_x.map_or_else(|| "null".to_owned(), |value| value.to_string());
-    let position_y = position_y.map_or_else(|| "null".to_owned(), |value| value.to_string());
-    format!(
-        r#"
-const strict = {strict};
-const positionX = {position_x};
-const positionY = {position_y};
-if (strict && matches.length > 1) {{
-  return {{
+// Shared probe body for the actionability wait loop. Parameters are substituted
+// once per wait; the wait loop reuses the resulting string across polls instead of
+// reassembling ~4KB of JavaScript on every 10ms tick.
+const ACTIONABILITY_PROBE_BODY: &str = r#"
+const strict = __STRICT__;
+const positionX = __POSITION_X__;
+const positionY = __POSITION_Y__;
+if (strict && matches.length > 1) {
+  return {
     count: matches.length,
     strict_violation: true,
     attached: false,
@@ -32419,29 +32469,29 @@ if (strict && matches.length > 1) {{
     enabled: false,
     stable: false,
     receives_events: false,
-  }};
-}}
+  };
+}
 const ownerDocument = el ? (el.ownerDocument || document) : document;
 const ownerWindow = ownerDocument.defaultView || window;
-const deepElementFromPoint = (x, y) => {{
+const deepElementFromPoint = (x, y) => {
   let hit = ownerDocument.elementFromPoint(x, y);
-  while (hit && hit.shadowRoot) {{
+  while (hit && hit.shadowRoot) {
     const nested = hit.shadowRoot.elementFromPoint(x, y);
     if (!nested || nested === hit) break;
     hit = nested;
-  }}
+  }
   return hit;
-}};
-const targetContains = node => {{
+};
+const targetContains = node => {
   let current = node;
-  while (current) {{
+  while (current) {
     if (current === el) return true;
     const root = current.getRootNode ? current.getRootNode() : null;
     current = current.parentElement || (root && root.host) || null;
-  }}
+  }
   return false;
-}};
-const snapshot = () => {{
+};
+const snapshot = () => {
   const attached = !!el && el.isConnected;
   const rect = attached ? el.getBoundingClientRect() : null;
   const style = attached ? ownerWindow.getComputedStyle(el) : null;
@@ -32455,7 +32505,7 @@ const snapshot = () => {{
     rect.height > 0
   );
   const enabled = attached && !disabledState(el);
-  const point = visible ? {{
+  const point = visible ? {
     x: Math.min(
       Math.max(rect.left + (positionX === null ? rect.width / 2 : positionX), 0),
       Math.max(ownerWindow.innerWidth - 1, 0)
@@ -32464,9 +32514,9 @@ const snapshot = () => {{
       Math.max(rect.top + (positionY === null ? rect.height / 2 : positionY), 0),
       Math.max(ownerWindow.innerHeight - 1, 0)
     ),
-  }} : null;
+  } : null;
   const hit = point ? deepElementFromPoint(point.x, point.y) : null;
-  return {{
+  return {
     count: matches.length,
     strict_violation: false,
     attached,
@@ -32478,22 +32528,22 @@ const snapshot = () => {{
     point_y: point ? point.y : null,
     rect_x: rect ? Number(rect.left) : null,
     rect_y: rect ? Number(rect.top) : null,
-    rect: rect ? {{
+    rect: rect ? {
       x: Number(rect.left),
       y: Number(rect.top),
       width: Number(rect.width),
       height: Number(rect.height),
-    }} : null,
-  }};
-}};
-if (el && el.isConnected) {{
-  el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-}}
+    } : null,
+  };
+};
+if (el && el.isConnected) {
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+}
 const first = snapshot();
 if (!first.attached) return first;
-return new Promise(resolve => {{
+return new Promise(resolve => {
   let settled = false;
-  const settle = () => {{
+  const settle = () => {
     if (settled) return;
     settled = true;
     const second = snapshot();
@@ -32503,7 +32553,7 @@ return new Promise(resolve => {{
       key => Math.abs(Number(left[key] || 0) - Number(right[key] || 0)) <= 0.5
     );
     resolve(second);
-  }};
+  };
   // Two animation frames detect motion between samples on a live page and win this race
   // in ~one frame there. But Chromium pauses requestAnimationFrame on hidden/occluded
   // pages, which would otherwise hang this probe until the operation deadline; a timer
@@ -32511,9 +32561,24 @@ return new Promise(resolve => {{
   // element on a background page be judged stable instead of stalling actionability.
   ownerWindow.requestAnimationFrame(() => ownerWindow.requestAnimationFrame(settle));
   ownerWindow.setTimeout(settle, 300);
-}});
-"#
-    )
+});
+"#;
+
+fn actionability_probe_body(
+    strict: bool,
+    position_x: Option<f64>,
+    position_y: Option<f64>,
+) -> String {
+    ACTIONABILITY_PROBE_BODY
+        .replace("__STRICT__", if strict { "true" } else { "false" })
+        .replace(
+            "__POSITION_X__",
+            &position_x.map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        )
+        .replace(
+            "__POSITION_Y__",
+            &position_y.map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        )
 }
 
 fn terminal_actionability_error(
@@ -32807,7 +32872,7 @@ async fn evaluate_resolved_locator_body(
             &page.browser.client,
             &resolved.session_id,
             frame_id,
-            expression,
+            &expression,
             deadline,
         )
         .await?
@@ -32816,7 +32881,7 @@ async fn evaluate_resolved_locator_body(
             &page.browser.client,
             &resolved.session_id,
             None,
-            expression,
+            &expression,
             deadline,
         )
         .await?
@@ -32824,22 +32889,96 @@ async fn evaluate_resolved_locator_body(
     Ok(serde_json::from_str(&json)?)
 }
 
+const ACTIONABILITY_POLL_INTERVAL_MIN: Duration = Duration::from_millis(10);
+const ACTIONABILITY_POLL_INTERVAL_MAX: Duration = Duration::from_millis(100);
+
+fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn actionability_progress_key(
+    state: &ActionabilityState,
+) -> (usize, u8, Option<(i64, i64)>, Option<(i64, i64)>) {
+    let mut flags = 0u8;
+    if state.strict_violation {
+        flags |= 1 << 0;
+    }
+    if state.attached {
+        flags |= 1 << 1;
+    }
+    if state.visible {
+        flags |= 1 << 2;
+    }
+    if state.enabled {
+        flags |= 1 << 3;
+    }
+    if state.stable {
+        flags |= 1 << 4;
+    }
+    if state.receives_events {
+        flags |= 1 << 5;
+    }
+    let point = match (state.point_x, state.point_y) {
+        (Some(x), Some(y)) => Some((x.round() as i64, y.round() as i64)),
+        _ => None,
+    };
+    let rect = match (state.rect_x, state.rect_y) {
+        (Some(x), Some(y)) => Some((x.round() as i64, y.round() as i64)),
+        _ => None,
+    };
+    (state.count, flags, point, rect)
+}
+
+fn next_actionability_poll_interval(current: Duration, state_unchanged: bool) -> Duration {
+    if state_unchanged {
+        current
+            .saturating_mul(2)
+            .clamp(ACTIONABILITY_POLL_INTERVAL_MIN, ACTIONABILITY_POLL_INTERVAL_MAX)
+    } else {
+        ACTIONABILITY_POLL_INTERVAL_MIN
+    }
+}
+
 async fn evaluate_actionability_probe(
     page: &Arc<PageInner>,
     locator_json: &str,
     index: usize,
-    position_x: Option<f64>,
-    position_y: Option<f64>,
-    strict: bool,
+    probe_body: &str,
+    pinned_resolution: &mut Option<LocatorSessionResolution>,
+    cached_expression: &mut Option<String>,
     deadline: OperationDeadline,
 ) -> RwResult<ActionabilityState> {
-    let resolution =
-        resolve_locator_action_session(Arc::clone(page), locator_json, deadline).await?;
-    let expression = locator_script(
-        &resolution.locator_json,
-        index,
-        &actionability_probe_body(strict, position_x, position_y),
-    );
+    let resolution = match pinned_resolution.as_ref() {
+        Some(pinned) if locator_resolution_ownership_is_current(page, pinned) => pinned.clone(),
+        _ => {
+            pinned_resolution.take();
+            cached_expression.take();
+            let resolution =
+                resolve_locator_action_session(Arc::clone(page), locator_json, deadline).await?;
+            *pinned_resolution = Some(resolution.clone());
+            resolution
+        }
+    };
+    if cached_expression.is_none() {
+        *cached_expression = Some(locator_script(
+            &resolution.locator_json,
+            index,
+            probe_body,
+        ));
+    }
+    let expression = cached_expression
+        .as_deref()
+        .expect("actionability probe expression was just cached");
     let value =
         evaluate_locator_resolution(page, &resolution, expression, deadline, Duration::ZERO)
             .await?;
@@ -32853,7 +32992,7 @@ fn is_transient_action_resolution_error(error: &RwError) -> bool {
         return true;
     }
     let message = match error {
-        RwError::Message(message) => message.to_ascii_lowercase(),
+        RwError::Message(message) => message.as_str(),
         _ => return false,
     };
     [
@@ -32863,7 +33002,7 @@ fn is_transient_action_resolution_error(error: &RwError) -> bool {
         "cdp did not return a main frame id",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
 }
 
 fn is_transient_actionability_target_error(error: &RwError) -> bool {
@@ -32871,7 +33010,7 @@ fn is_transient_actionability_target_error(error: &RwError) -> bool {
         return true;
     }
     let message = match error {
-        RwError::Cdp { message, .. } | RwError::Message(message) => message.to_ascii_lowercase(),
+        RwError::Cdp { message, .. } | RwError::Message(message) => message.as_str(),
         _ => return false,
     };
     [
@@ -32883,7 +33022,7 @@ fn is_transient_actionability_target_error(error: &RwError) -> bool {
         "no element matches locator",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
 }
 
 async fn wait_for_actionable_locator_point(
@@ -32898,6 +33037,11 @@ async fn wait_for_actionable_locator_point(
     deadline: OperationDeadline,
 ) -> RwResult<ResolvedLocatorPoint> {
     let mut last_state = None;
+    let mut last_progress_key = None;
+    let mut pinned_resolution = None;
+    let mut cached_expression = None;
+    let mut poll_interval = ACTIONABILITY_POLL_INTERVAL_MIN;
+    let probe_body = actionability_probe_body(strict, position_x, position_y);
     let requires_enabled = action.requires_enabled();
 
     loop {
@@ -32913,9 +33057,9 @@ async fn wait_for_actionable_locator_point(
             &page,
             locator_json,
             index,
-            position_x,
-            position_y,
-            strict,
+            &probe_body,
+            &mut pinned_resolution,
+            &mut cached_expression,
             deadline,
         )
         .await
@@ -32929,6 +33073,10 @@ async fn wait_for_actionable_locator_point(
                 ));
             }
             Err(error) if is_transient_action_resolution_error(&error) => {
+                pinned_resolution = None;
+                cached_expression = None;
+                poll_interval = ACTIONABILITY_POLL_INTERVAL_MIN;
+                last_progress_key = None;
                 verify_locator_wait_target_liveness(&page, deadline).await?;
                 let _ = refresh_page_frame_tree(
                     &page,
@@ -32969,6 +33117,9 @@ async fn wait_for_actionable_locator_point(
             && state.stable
             && state.receives_events
             && hit_tested.is_some();
+        let progress_key = actionability_progress_key(&state);
+        let state_unchanged = last_progress_key == Some(progress_key);
+        last_progress_key = Some(progress_key);
         last_state = Some(state);
         if actionable {
             match resolve_locator_point(
@@ -32985,6 +33136,10 @@ async fn wait_for_actionable_locator_point(
             {
                 Ok(resolved) => return Ok(resolved),
                 Err(error) if is_transient_actionability_target_error(&error) => {
+                    pinned_resolution = None;
+                    cached_expression = None;
+                    poll_interval = ACTIONABILITY_POLL_INTERVAL_MIN;
+                    last_progress_key = None;
                     if let Some(state) = last_state.as_mut() {
                         state.attached = false;
                     }
@@ -33004,7 +33159,8 @@ async fn wait_for_actionable_locator_point(
                 ));
             }
         };
-        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+        poll_interval = next_actionability_poll_interval(poll_interval, state_unchanged);
+        tokio::time::sleep(remaining.min(poll_interval)).await;
     }
 }
 
@@ -33918,7 +34074,7 @@ async fn evaluate_expression_in_session(
     client: &CdpClient,
     session_id: &str,
     realm_identity: Option<&str>,
-    expression: String,
+    expression: &str,
     timeout: Duration,
 ) -> RwResult<String> {
     evaluate_expression_in_session_before(
@@ -33935,11 +34091,11 @@ async fn evaluate_expression_in_session_before(
     client: &CdpClient,
     session_id: &str,
     realm_identity: Option<&str>,
-    expression: String,
+    expression: &str,
     deadline: OperationDeadline,
 ) -> RwResult<String> {
     let realm = client.serializer_realm_key(session_id, realm_identity);
-    evaluate_serialized_expression_before(client, &realm, None, &expression, deadline).await
+    evaluate_serialized_expression_before(client, &realm, None, expression, deadline).await
 }
 
 async fn evaluate_handle_expression_in_session(
@@ -33969,7 +34125,7 @@ async fn evaluate_expression_in_frame_context(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
-    expression: String,
+    expression: &str,
     deadline: OperationDeadline,
 ) -> RwResult<String> {
     let context_id =
@@ -33991,13 +34147,13 @@ async fn evaluate_expression_in_context_before(
     session_id: &str,
     realm_identity: Option<&str>,
     context_id: Value,
-    expression: String,
+    expression: &str,
     deadline: OperationDeadline,
 ) -> RwResult<String> {
     let realm = client
         .serializer_realm_key(session_id, realm_identity)
         .in_world(FRAME_UTILITY_WORLD_NAME);
-    evaluate_serialized_expression_before(client, &realm, Some(&context_id), &expression, deadline)
+    evaluate_serialized_expression_before(client, &realm, Some(&context_id), expression, deadline)
         .await
 }
 
@@ -34158,7 +34314,7 @@ async fn execution_context_for_locator_resolution(
 async fn evaluate_locator_resolution(
     page: &PageInner,
     resolution: &LocatorSessionResolution,
-    expression: String,
+    expression: &str,
     setup_deadline: OperationDeadline,
     transport_slack: Duration,
 ) -> RwResult<String> {
@@ -34277,7 +34433,7 @@ async fn evaluate_locator_for_page(
         let resolution =
             resolve_locator_session(Arc::clone(&page), &locator_json, deadline).await?;
         let expression = locator_script(&resolution.locator_json, index, &body);
-        match evaluate_locator_resolution(&page, &resolution, expression, deadline, Duration::ZERO)
+        match evaluate_locator_resolution(&page, &resolution, &expression, deadline, Duration::ZERO)
             .await
         {
             Err(error)
@@ -34316,7 +34472,7 @@ async fn evaluate_locator_action_with_deadline(
             let value = evaluate_locator_resolution(
                 page,
                 &resolution,
-                expression,
+                &expression,
                 deadline,
                 Duration::ZERO,
             )
@@ -34555,7 +34711,7 @@ enum ActionDispatchReplyDisposition {
 
 fn action_dispatch_reply_disposition(error: &RwError) -> ActionDispatchReplyDisposition {
     let message = match error {
-        RwError::Cdp { message, .. } | RwError::Message(message) => message.to_ascii_lowercase(),
+        RwError::Cdp { message, .. } | RwError::Message(message) => message.as_str(),
         _ => return ActionDispatchReplyDisposition::DeterministicFailure,
     };
     // Retry only failures that prove dispatch did not reach the resolved element.
@@ -34571,7 +34727,7 @@ fn action_dispatch_reply_disposition(error: &RwError) -> ActionDispatchReplyDisp
         "cannot find object with id",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
     {
         return ActionDispatchReplyDisposition::SafeRetry;
     }
@@ -34580,7 +34736,7 @@ fn action_dispatch_reply_disposition(error: &RwError) -> ActionDispatchReplyDisp
         "inspected target navigated or closed",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
     {
         return ActionDispatchReplyDisposition::AmbiguousContextLoss;
     }
@@ -35036,7 +35192,7 @@ async fn cleanup_fill_guards_for_page(
     evaluate_locator_resolution(
         &page,
         &resolution,
-        fill_guard_cleanup_expression(guard_key)?,
+        &fill_guard_cleanup_expression(guard_key)?,
         deadline,
         Duration::ZERO,
     )
@@ -35060,7 +35216,7 @@ async fn cleanup_retained_fill_guard(
     evaluate_locator_resolution(
         &page,
         &resolution,
-        fill_guard_cleanup_expression(guard_key)?,
+        &fill_guard_cleanup_expression(guard_key)?,
         deadline,
         Duration::ZERO,
     )
@@ -35085,7 +35241,7 @@ async fn cleanup_fill_guard_after_success(
         if evaluate_locator_resolution(
             page,
             resolution,
-            cleanup_expression.clone(),
+            &cleanup_expression,
             OperationDeadline::new(budget),
             Duration::ZERO,
         )
@@ -35103,7 +35259,7 @@ async fn cleanup_fill_guard_after_success(
     let _ = evaluate_locator_resolution(
         page,
         resolution,
-        fill_guard_passivation_expression(guard_key)?,
+        &fill_guard_passivation_expression(guard_key)?,
         OperationDeadline::new(budget),
         Duration::ZERO,
     )
@@ -35199,7 +35355,7 @@ async fn evaluate_locator_fill_for_page(
             let observation = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                fill_guard_reentry_observation_expression(&guard_key)?,
+                &fill_guard_reentry_observation_expression(&guard_key)?,
                 deadline,
                 Duration::ZERO,
             )
@@ -35281,7 +35437,7 @@ async fn evaluate_locator_fill_for_page(
                 match evaluate_locator_resolution(
                     &page,
                     &resolution,
-                    expression,
+                    &expression,
                     deadline,
                     Duration::ZERO,
                 )
@@ -35339,7 +35495,7 @@ async fn evaluate_locator_fill_for_page(
             let ready_json = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                ready_expression,
+                &ready_expression,
                 deadline,
                 Duration::ZERO,
             )
@@ -35381,7 +35537,7 @@ return null;
             let commitment = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                commitment_expression,
+                &commitment_expression,
                 deadline,
                 Duration::ZERO,
             )
@@ -35484,7 +35640,7 @@ return {{ actual, dispatch, info }};
         let actual_json = match evaluate_locator_resolution(
             &page,
             &resolution,
-            actual_body,
+            &actual_body,
             deadline,
             Duration::ZERO,
         )
@@ -35626,7 +35782,7 @@ return {{ actual, dispatch, info }};
             let _ = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                passive_expression,
+                &passive_expression,
                 OperationDeadline::new(Duration::from_millis(100)),
                 Duration::ZERO,
             )
@@ -35646,7 +35802,7 @@ return {{ actual, dispatch, info }};
             let _ = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                fill_guard_cleanup_expression(&guard_key)?,
+                &fill_guard_cleanup_expression(&guard_key)?,
                 OperationDeadline::new(Duration::from_millis(100)),
                 Duration::ZERO,
             )
@@ -36796,7 +36952,7 @@ async fn page_goto_async(
 
 fn is_cdp_session_loss(error: &RwError) -> bool {
     let message = match error {
-        RwError::Cdp { message, .. } => message.to_ascii_lowercase(),
+        RwError::Cdp { message, .. } => message.as_str(),
         _ => return false,
     };
     [
@@ -36806,7 +36962,7 @@ fn is_cdp_session_loss(error: &RwError) -> bool {
         "session detached",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
 }
 
 fn is_frame_ownership_changed(error: &RwError) -> bool {
@@ -37149,7 +37305,7 @@ async fn page_history_observed_impl(
 
 fn is_locator_wait_context_loss(error: &RwError) -> bool {
     let message = match error {
-        RwError::Cdp { message, .. } => message.to_ascii_lowercase(),
+        RwError::Cdp { message, .. } => message.as_str(),
         _ => return false,
     };
     // Only retry when the resolved execution environment disappeared; page terminal state is
@@ -37171,7 +37327,7 @@ fn is_locator_wait_context_loss(error: &RwError) -> bool {
         "frame ownership changed during locator resolution",
     ]
     .iter()
-    .any(|fragment| message.contains(fragment))
+    .any(|fragment| ascii_contains_ignore_case(message, fragment))
 }
 
 fn locator_wait_terminal_error(page: &PageInner) -> Option<RwError> {
@@ -37266,7 +37422,7 @@ async fn evaluate_wait_for_selector_attempt(
     evaluate_locator_resolution(
         page,
         &resolution,
-        expression,
+        &expression,
         deadline,
         Duration::from_secs(1),
     )
@@ -37452,7 +37608,7 @@ async fn evaluate_locator_assertion_attempt(
     let resolution = resolve_locator_session(Arc::clone(&page), &locator_json, deadline).await?;
     let expression = locator_script(&resolution.locator_json, index, &probe_body);
     let wire_json =
-        evaluate_locator_resolution(&page, &resolution, expression, deadline, Duration::ZERO)
+        evaluate_locator_resolution(&page, &resolution, &expression, deadline, Duration::ZERO)
             .await?;
     locator_assertion_result_from_wire(&wire_json)
 }
@@ -42272,7 +42428,7 @@ impl PyWorker {
                 &client,
                 &session_id,
                 Some(&realm_identity),
-                expression,
+                &expression,
                 timeout,
             ))
         })
@@ -46717,7 +46873,7 @@ for (const fallback of Array.from(doc.querySelectorAll('[data-rustwright-keyboar
 }
 return true;"#,
     );
-    evaluate_locator_resolution(page, resolution, expression, deadline, Duration::ZERO)
+    evaluate_locator_resolution(page, resolution, &expression, deadline, Duration::ZERO)
         .await
         .map(|_| ())
 }

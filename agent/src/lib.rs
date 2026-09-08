@@ -95,6 +95,16 @@ pub struct SnapshotStructure {
     pub renderer_incomplete_index: Option<usize>,
 }
 
+impl SnapshotStructure {
+    fn outline(&self) -> String {
+        if !self.legacy.is_empty() {
+            self.legacy.clone()
+        } else {
+            self.units.join("\n")
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabEntry {
     pub index: usize,
@@ -149,12 +159,42 @@ pub struct ResponseShape {
 
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 const SNAPSHOT_LEGACY_JS: &str = include_str!("snapshot_legacy.js");
+const SNAPSHOT_HELPER_SYMBOL: &str = "rustwright.mcp.snapshotHelper.v1";
+const SNAPSHOT_HELPER_MISSING: &str = "SNAPSHOT_HELPER_MISSING";
 
 fn selected_snapshot_script(distill: bool) -> &'static str {
     if distill {
         SNAPSHOT_JS
     } else {
         SNAPSHOT_LEGACY_JS
+    }
+}
+
+fn snapshot_helper_install_expression(script: &str) -> String {
+    format!(
+        r#"(() => {{
+  globalThis[Symbol.for("{SNAPSHOT_HELPER_SYMBOL}")] = ({script});
+  return true;
+}})()"#
+    )
+}
+
+fn snapshot_helper_invoke_expression() -> String {
+    format!(
+        r#"(options) => {{
+  const helper = globalThis[Symbol.for("{SNAPSHOT_HELPER_SYMBOL}")];
+  if (typeof helper !== "function") {{
+    throw new Error("{SNAPSHOT_HELPER_MISSING}");
+  }}
+  return helper(options);
+}}"#
+    )
+}
+
+fn snapshot_helper_missing(error: &BrowserError) -> bool {
+    match error {
+        BrowserError::Message(message) => message.contains(SNAPSHOT_HELPER_MISSING),
+        _ => false,
     }
 }
 const BEGIN_SENSITIVE_SNAPSHOT_TRACKING_JS: &str = r#"(input) => {
@@ -1318,6 +1358,9 @@ struct BrowserState {
     header_state: Option<BrowserHeaderState>,
     inventory_stale: bool,
     snapshot_evaluator: Option<SnapshotEvaluationSeam>,
+    /// Target id whose main world currently holds the installed snapshot helper.
+    /// Cleared on navigation / page swap so the next snapshot reinstalls.
+    snapshot_helper_target: Option<String>,
     page_record_source: Option<Box<dyn PageRecordSource>>,
     lifecycle_subscription_provider: LifecycleSubscriptionProvider,
     browser_query_provider: Box<dyn BrowserQueryProvider>,
@@ -1532,6 +1575,7 @@ impl Default for BrowserState {
             header_state: None,
             inventory_stale: false,
             snapshot_evaluator: None,
+            snapshot_helper_target: None,
             page_record_source: None,
             lifecycle_subscription_provider: Box::new(|browser| {
                 browser.map(|browser| {
@@ -2146,12 +2190,16 @@ impl BrowserState {
         handle: ActivePageHandle,
         registration_browser: Option<&Browser>,
     ) -> Result<(), Error> {
+        self.snapshot_helper_target = None;
         self.register_page_with_browser(registration, registration_browser)?;
         self.page = Some(handle);
         Ok(())
     }
 
     fn clear_active_target(&mut self, target_id: &str) {
+        if self.snapshot_helper_target.as_deref() == Some(target_id) {
+            self.snapshot_helper_target = None;
+        }
         if self.active_target_id.as_deref() == Some(target_id)
             || self
                 .page
@@ -2265,6 +2313,9 @@ impl BrowserState {
 
     fn begin_observed_navigation(&mut self, target_id: &str, url: Option<String>) {
         self.poll_events();
+        if self.snapshot_helper_target.as_deref() == Some(target_id) {
+            self.snapshot_helper_target = None;
+        }
         let Some(runtime) = self.pages.get_mut(target_id) else {
             return;
         };
@@ -2827,6 +2878,9 @@ impl BrowserState {
     // return its masked state. Callers reach the post-snapshot only after an
     // action completed or live progress was observed, so any degradation in
     // `committed_snapshot_result` applies to state the page may already contain.
+    // Post-action and ordinary snapshots share the installed page helper, so the
+    // ~17KB snapshot script is transferred once per page generation rather than
+    // on every committed observation.
     fn capture_committed_action_state(&mut self, request: &ActorRequest) -> TextResult {
         committed_snapshot_result(self.snapshot_with_cancel(request, None))
     }
@@ -2918,11 +2972,6 @@ impl BrowserState {
             remaining_override,
             None,
         )?;
-        let outline = value
-            .get("outline")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BrowserError::Message(format!("snapshot returned no outline: {value}")))?
-            .to_owned();
         let units: Vec<String> = value
             .get("units")
             .and_then(Value::as_array)
@@ -2933,7 +2982,15 @@ impl BrowserState {
                     .map(ToOwned::to_owned)
                     .collect()
             })
-            .unwrap_or_else(|| outline.lines().map(ToOwned::to_owned).collect());
+            .or_else(|| {
+                value
+                    .get("outline")
+                    .and_then(Value::as_str)
+                    .map(|outline| outline.lines().map(ToOwned::to_owned).collect())
+            })
+            .ok_or_else(|| {
+                BrowserError::Message(format!("snapshot returned no outline: {value}"))
+            })?;
         let renderer_incomplete = value
             .get("rendererIncomplete")
             .and_then(Value::as_str)
@@ -2941,17 +2998,25 @@ impl BrowserState {
         let renderer_incomplete_index = renderer_incomplete
             .as_ref()
             .map(|_| units.len().saturating_sub(1));
+        let head = units.first().cloned();
         self.response_shape
             .get_or_insert_with(ResponseShape::default)
             .snapshot = Some(SnapshotStructure {
-            legacy: outline.clone(),
-            head: units.first().cloned(),
+            // Prefer `units` as the single materialized outline source; `legacy`
+            // stays empty unless an older consumer filled it.
+            legacy: String::new(),
+            head,
             units,
             renderer_incomplete,
             renderer_incomplete_index,
         });
         self.commit_snapshot_refs(&value, start_ref)?;
-        Ok(outline)
+        Ok(self
+            .response_shape
+            .as_ref()
+            .and_then(|shape| shape.snapshot.as_ref())
+            .map(SnapshotStructure::outline)
+            .expect("snapshot structure was just stored"))
     }
     fn limited_snapshot(&mut self, max_items: usize, request: &ActorRequest) -> TextResult {
         let outline = self.snapshot(request)?;
@@ -3005,22 +3070,107 @@ impl BrowserState {
         // A `remaining_override` is only ever supplied by the committed post-action
         // path, which also passes no cancel token; both say the same thing, that this
         // snapshot observes an action that already landed.
-        let page = self.ensure_page_for(request, remaining_override.is_some())?;
-        let result = page.evaluate_with_cancel(
-            script,
-            Some(&input),
-            ActionOptions::timeout(Self::engine_timeout(remaining)),
-            cancel,
-        );
-        let value = result.map_err(|error| {
+        let committed_observation = remaining_override.is_some();
+        let target_id = self
+            .ensure_page_for(request, committed_observation)?
+            .target_id();
+        let engine_timeout = ActionOptions::timeout(Self::engine_timeout(remaining));
+        let helper_ready = self.snapshot_helper_target.as_deref() == Some(target_id.as_str());
+        let value = if helper_ready {
+            let result = self
+                .ensure_page_for(request, committed_observation)?
+                .evaluate_with_cancel(
+                    &snapshot_helper_invoke_expression(),
+                    Some(&input),
+                    engine_timeout,
+                    cancel,
+                );
+            match result {
+                Ok(value) => value,
+                Err(error) => {
+                    let classified = self.operation_error(
+                        "snapshot evaluation failed",
+                        error,
+                        &request.cancellation,
+                        request.timeout_ms,
+                    );
+                    if !snapshot_helper_missing(&classified) {
+                        return Err(classified);
+                    }
+                    self.snapshot_helper_target = None;
+                    self.install_and_invoke_snapshot_helper(
+                        request,
+                        &target_id,
+                        script,
+                        &input,
+                        engine_timeout,
+                        cancel,
+                        committed_observation,
+                    )?
+                }
+            }
+        } else {
+            self.install_and_invoke_snapshot_helper(
+                request,
+                &target_id,
+                script,
+                &input,
+                engine_timeout,
+                cancel,
+                committed_observation,
+            )?
+        };
+        Ok((value, start_ref))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_and_invoke_snapshot_helper(
+        &mut self,
+        request: &ActorRequest,
+        target_id: &str,
+        script: &str,
+        input: &Value,
+        engine_timeout: ActionOptions,
+        cancel: Option<&CancelToken>,
+        committed_observation: bool,
+    ) -> Result<Value, BrowserError> {
+        let install_result = {
+            let page = self.ensure_page_for(request, committed_observation)?;
+            page.evaluate_with_cancel(
+                &snapshot_helper_install_expression(script),
+                None,
+                engine_timeout,
+                cancel,
+            )
+        };
+        install_result.map_err(|error| {
+            self.snapshot_helper_target = None;
+            self.operation_error(
+                "snapshot helper install failed",
+                error,
+                &request.cancellation,
+                request.timeout_ms,
+            )
+        })?;
+        self.snapshot_helper_target = Some(target_id.to_owned());
+        let invoke_result = {
+            let page = self.ensure_page_for(request, committed_observation)?;
+            page.evaluate_with_cancel(
+                &snapshot_helper_invoke_expression(),
+                Some(input),
+                engine_timeout,
+                cancel,
+            )
+        };
+        invoke_result.map_err(|error| {
+            self.snapshot_helper_target = None;
             self.operation_error(
                 "snapshot evaluation failed",
                 error,
                 &request.cancellation,
                 request.timeout_ms,
             )
-        })?;
-        Ok((value, start_ref))
+        })
     }
 
     fn commit_snapshot_refs(&mut self, value: &Value, start_ref: u64) -> Result<(), BrowserError> {
@@ -5499,7 +5649,7 @@ impl BrowserState {
         let output = result.map(|output| match (output, self.response_shape.take()) {
             (BrowserOutput::Text(text), Some(mut shape)) => {
                 if let Some(snapshot) = shape.snapshot.as_ref() {
-                    let suffix = format!("\n\n### Snapshot\n{}", snapshot.legacy);
+                    let suffix = format!("\n\n### Snapshot\n{}", snapshot.outline());
                     shape.result_prefix = text.strip_suffix(&suffix).map(ToOwned::to_owned);
                 }
                 BrowserOutput::ShapedText { text, shape }
@@ -5511,6 +5661,7 @@ impl BrowserState {
 
     fn close(&mut self) {
         self.current_refs.clear();
+        self.snapshot_helper_target = None;
         self.pages.clear();
         self.tab_order.clear();
         self.closing_targets.clear();
@@ -7814,6 +7965,29 @@ mod tests {
             assert_eq!(start_ref, 1);
             assert_eq!(*captured.lock().unwrap(), Some(expected));
         }
+    }
+
+    #[test]
+    fn snapshot_helper_install_and_invoke_expressions_share_one_symbol() {
+        let install = snapshot_helper_install_expression("options => options");
+        let invoke = snapshot_helper_invoke_expression();
+        assert!(install.contains(SNAPSHOT_HELPER_SYMBOL));
+        assert!(invoke.contains(SNAPSHOT_HELPER_SYMBOL));
+        assert!(invoke.contains(SNAPSHOT_HELPER_MISSING));
+        assert!(snapshot_helper_missing(&BrowserError::Message(format!(
+            "Error: {SNAPSHOT_HELPER_MISSING}"
+        ))));
+        assert!(!snapshot_helper_missing(&BrowserError::Message(
+            "unrelated failure".to_owned()
+        )));
+        let structure = SnapshotStructure {
+            legacy: String::new(),
+            units: vec!["- main".to_owned(), "  - button".to_owned()],
+            head: Some("- main".to_owned()),
+            renderer_incomplete: None,
+            renderer_incomplete_index: None,
+        };
+        assert_eq!(structure.outline(), "- main\n  - button");
     }
 
     #[test]
