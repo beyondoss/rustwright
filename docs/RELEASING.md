@@ -29,10 +29,6 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
   - `python/rustwright/cli.py` → source-checkout fallback in `_version`
   - `python/rustwright/_backend.py` → source-checkout fallback in `_version` (before `+local`)
   - `python/rustwright/_agent/cli.py` → source-checkout fallback
-- [ ] Add a `## [<version>] - <date>` section to `CHANGELOG.md` by renaming the
-      current `## [Unreleased]` section and opening a fresh empty one above it,
-      add the matching link reference at the bottom, and add the version to
-      `REQUIRED_VERSIONS` in `tests/test_changelog.py`.
 - [ ] Regenerate the lockfiles; do not edit generated entries by hand. There are
       three Cargo lockfiles, because `cli/` and `mcp/` are separate workspaces
       that depend on `rustwright-core` by path — the root `cargo` command does
@@ -50,7 +46,7 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
 - [ ] Confirm nothing was missed:
 
   ```bash
-  git grep -n "$PREVIOUS_VERSION" -- . ':!CHANGELOG.md' ':!docs/'
+  git grep -n "$PREVIOUS_VERSION" -- . ':!docs/'
   ```
 
 - [ ] Run local release checks:
@@ -68,7 +64,8 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
 - [ ] Tag the merge commit `v${VERSION}` and push the tag.
 - [ ] Build release binaries for the supported targets (at least the
       `rustwright-cli-<target>` names expected by `install.sh`).
-- [ ] Create a GitHub Release for the tag and upload those assets.
+- [ ] Create a GitHub Release for the tag and upload those assets. Put release
+      notes on the GitHub Release itself (there is no in-repo changelog).
 - [ ] Confirm `install.sh` (or an equivalent curl install path) downloads the
       new CLI asset successfully on a clean machine.
 
