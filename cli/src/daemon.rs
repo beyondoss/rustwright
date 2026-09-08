@@ -422,10 +422,9 @@ fn validate_session_name(session: &str) -> Result<()> {
 /// Create `path` (and missing parents) with mode `0o700`, or harden an existing
 /// directory in place. Modes are applied at creation time so a newly created
 /// state directory is never briefly world-accessible under a permissive umask.
+/// Existing paths are opened with `O_DIRECTORY|O_NOFOLLOW` before `fchmod` so a
+/// symlink cannot redirect the hardening step onto another inode.
 fn ensure_secure_directory(path: &Path) -> Result<()> {
-    if path.exists() {
-        return secure_existing_directory(path);
-    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             ensure_secure_directory(parent)?;
@@ -456,8 +455,25 @@ fn create_secure_directory(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn secure_existing_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "failed to open daemon state directory {} for hardening",
+                path.display()
+            )
+        })?;
+    // SAFETY: `dir` is this process's owned fd, opened with O_DIRECTORY|O_NOFOLLOW,
+    // so fchmod applies to that directory inode and cannot follow a symlink.
+    let result = unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     Ok(())
 }
 
@@ -522,5 +538,36 @@ mod tests {
         let response: CommandResponse = serde_json::from_str(&client.join().unwrap()).unwrap();
         assert!(!response.success);
         assert_eq!(response.error.as_deref(), Some("request is too large"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_directory_creates_0700_hardens_existing_and_rejects_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let created = temporary.path().join("created");
+        ensure_secure_directory(&created).unwrap();
+        assert_eq!(
+            fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let existing = temporary.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_secure_directory(&existing).unwrap();
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let link = temporary.path().join("link");
+        std::os::unix::fs::symlink(&created, &link).unwrap();
+        assert!(ensure_secure_directory(&link).is_err());
+        assert_eq!(
+            fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }

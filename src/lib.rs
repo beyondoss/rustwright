@@ -13,7 +13,7 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 #[cfg(feature = "test-support")]
 use std::sync::LazyLock;
 #[cfg(feature = "python")]
@@ -463,6 +463,9 @@ const CDP_RETAINED_ARRAY_MAX_ITEMS: usize = 128;
 const CDP_DIAGNOSTIC_TRAFFIC_LIMIT: usize = 32;
 const CDP_EVENT_UNREPLAYABLE_MARKER: &str = "__rustwright_cdp_event_unreplayable";
 const CDP_DIAGNOSTIC_LIST_LIMIT: usize = 32;
+/// Hard cap on CDP payloads waiting for the writer. A stalled WebSocket must
+/// not grow an unbounded `mpsc` queue; further sends fail as not-written.
+const CDP_WRITE_QUEUE_LIMIT: usize = 1024;
 const CDP_DIAGNOSTIC_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
 const TIMEOUT_DIAGNOSTIC_BANNER: &str = "RUSTWRIGHT TIMEOUT DIAGNOSTIC";
 const FRAME_UTILITY_WORLD_NAME: &str = "__utility_world__";
@@ -3436,7 +3439,7 @@ mod tests {
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -5279,7 +5282,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = Arc::new(CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -5440,7 +5443,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = Arc::new(CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -5554,7 +5557,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -5955,7 +5958,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -6040,7 +6043,7 @@ multiline-compatible = """4.5.6"""
             .retention_gate
             .clone();
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending,
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events,
@@ -6148,7 +6151,7 @@ multiline-compatible = """4.5.6"""
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime::new(runtime),
             client: Arc::new(CdpClient {
-                write_tx,
+                write_tx: write_tx.into(),
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
@@ -9209,7 +9212,7 @@ multiline-compatible = """4.5.6"""
             let inner = Arc::new(BrowserInner {
                 runtime: OwnedRuntime::new(runtime),
                 client: Arc::new(CdpClient {
-                    write_tx,
+                    write_tx: write_tx.into(),
                     pending: Arc::new(Mutex::new(HashMap::new())),
                     outstanding: Arc::new(Mutex::new(HashMap::new())),
                     events,
@@ -9284,7 +9287,7 @@ multiline-compatible = """4.5.6"""
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime::new(runtime),
             client: Arc::new(CdpClient {
-                write_tx,
+                write_tx: write_tx.into(),
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
@@ -9373,7 +9376,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -9456,7 +9459,7 @@ multiline-compatible = """4.5.6"""
         };
         (
             CdpClient {
-                write_tx,
+                write_tx: write_tx.into(),
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
@@ -9600,7 +9603,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -9687,7 +9690,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -9769,7 +9772,7 @@ multiline-compatible = """4.5.6"""
             (event_log, retention_gate)
         };
         let client = Arc::new(CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events,
@@ -9951,7 +9954,7 @@ multiline-compatible = """4.5.6"""
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime(None),
             client: Arc::new(CdpClient {
-                write_tx,
+                write_tx: write_tx.into(),
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events,
@@ -11465,7 +11468,7 @@ multiline-compatible = """4.5.6"""
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = Arc::new(CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -24950,6 +24953,154 @@ enum CdpOutgoing {
     Close,
 }
 
+struct CdpWriteBudget {
+    queued: AtomicUsize,
+    limit: usize,
+}
+
+impl CdpWriteBudget {
+    fn unlimited() -> Arc<Self> {
+        Arc::new(Self {
+            queued: AtomicUsize::new(0),
+            limit: usize::MAX,
+        })
+    }
+
+    fn limited(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            queued: AtomicUsize::new(0),
+            limit,
+        })
+    }
+
+    fn try_reserve(&self) -> bool {
+        if self.limit == usize::MAX {
+            return true;
+        }
+        loop {
+            let current = self.queued.load(Ordering::SeqCst);
+            if current >= self.limit {
+                return false;
+            }
+            if self
+                .queued
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn release(&self) {
+        if self.limit == usize::MAX {
+            return;
+        }
+        self.queued.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct CdpWriteSlot<'a>(&'a CdpWriteBudget);
+
+impl Drop for CdpWriteSlot<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+enum CdpWriteEnqueueError {
+    Closed,
+    QueueFull,
+}
+
+#[derive(Clone)]
+struct CdpWriteTx {
+    tx: mpsc::UnboundedSender<CdpOutgoing>,
+    budget: Arc<CdpWriteBudget>,
+}
+
+impl CdpWriteTx {
+    fn unbounded(tx: mpsc::UnboundedSender<CdpOutgoing>) -> Self {
+        Self {
+            tx,
+            budget: CdpWriteBudget::unlimited(),
+        }
+    }
+
+    fn limited(tx: mpsc::UnboundedSender<CdpOutgoing>) -> Self {
+        Self {
+            tx,
+            budget: CdpWriteBudget::limited(CDP_WRITE_QUEUE_LIMIT),
+        }
+    }
+
+    fn send(
+        &self,
+        message: CdpOutgoing,
+    ) -> Result<(), mpsc::error::SendError<CdpOutgoing>> {
+        self.tx.send(message)
+    }
+
+    fn enqueue(&self, message: CdpOutgoing) -> Result<(), CdpWriteEnqueueError> {
+        if matches!(message, CdpOutgoing::Close) {
+            return self
+                .tx
+                .send(message)
+                .map_err(|_| CdpWriteEnqueueError::Closed);
+        }
+        if !self.budget.try_reserve() {
+            return Err(CdpWriteEnqueueError::QueueFull);
+        }
+        if self.tx.send(message).is_err() {
+            self.budget.release();
+            return Err(CdpWriteEnqueueError::Closed);
+        }
+        Ok(())
+    }
+}
+
+impl From<mpsc::UnboundedSender<CdpOutgoing>> for CdpWriteTx {
+    fn from(tx: mpsc::UnboundedSender<CdpOutgoing>) -> Self {
+        Self::unbounded(tx)
+    }
+}
+
+#[cfg(test)]
+mod cdp_write_queue_tests {
+    use super::*;
+
+    #[test]
+    fn budget_rejects_at_limit_and_releases_slots() {
+        let budget = CdpWriteBudget::limited(2);
+        assert!(budget.try_reserve());
+        assert!(budget.try_reserve());
+        assert!(!budget.try_reserve());
+        budget.release();
+        assert!(budget.try_reserve());
+        assert!(!budget.try_reserve());
+    }
+
+    #[test]
+    fn enqueue_reports_queue_full_without_closing() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let write_tx = CdpWriteTx {
+            tx,
+            budget: CdpWriteBudget::limited(1),
+        };
+        let text = || CdpOutgoing::Text {
+            payload: "{}".to_string(),
+            tracker: None,
+            diagnostic_id: None,
+        };
+        assert!(write_tx.enqueue(text()).is_ok());
+        assert!(matches!(
+            write_tx.enqueue(text()),
+            Err(CdpWriteEnqueueError::QueueFull)
+        ));
+        assert!(write_tx.send(CdpOutgoing::Close).is_ok());
+    }
+}
+
 const CDP_WRITE_QUEUED: u8 = 0;
 const CDP_WRITE_WRITING: u8 = 1;
 const CDP_WRITE_WRITTEN: u8 = 2;
@@ -25598,7 +25749,7 @@ impl CdpRuntimeState {
 
 fn spawn_serializer_release_pump(
     mut release_rx: mpsc::UnboundedReceiver<SerializerRelease>,
-    write_tx: mpsc::UnboundedSender<CdpOutgoing>,
+    write_tx: CdpWriteTx,
 ) {
     static NEXT_RELEASE_ID: AtomicU64 = AtomicU64::new(8_000_000_000_000_000);
     tokio::spawn(async move {
@@ -25610,15 +25761,18 @@ fn spawn_serializer_release_pump(
                 "params": { "objectId": release.object_id },
                 "sessionId": release.session_id,
             });
-            if write_tx
-                .send(CdpOutgoing::Text {
-                    payload: payload.to_string(),
-                    tracker: None,
-                    diagnostic_id: None,
-                })
-                .is_err()
-            {
-                break;
+            match write_tx.enqueue(CdpOutgoing::Text {
+                payload: payload.to_string(),
+                tracker: None,
+                diagnostic_id: None,
+            }) {
+                Ok(()) => {}
+                Err(CdpWriteEnqueueError::Closed) => break,
+                Err(CdpWriteEnqueueError::QueueFull) => {
+                    eprintln!(
+                        "rustwright: dropping Runtime.releaseObject because the CDP write queue is full"
+                    );
+                }
             }
         }
     });
@@ -25737,7 +25891,7 @@ fn action_dispatch_receipt_from_event(
 }
 
 struct CdpClient {
-    write_tx: mpsc::UnboundedSender<CdpOutgoing>,
+    write_tx: CdpWriteTx,
     pending: CdpPendingMap,
     outstanding: CdpOutstandingMap,
     events: broadcast::Sender<Value>,
@@ -26900,6 +27054,8 @@ impl CdpClient {
     {
         let (mut write, mut read) = stream.split();
         let (write_tx, mut write_rx) = mpsc::unbounded_channel::<CdpOutgoing>();
+        let write_tx = CdpWriteTx::limited(write_tx);
+        let write_budget = Arc::clone(&write_tx.budget);
         let pending: CdpPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = Arc::clone(&pending);
         let outstanding: CdpOutstandingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -26936,6 +27092,8 @@ impl CdpClient {
 
         tokio::spawn(async move {
             while let Some(message) = write_rx.recv().await {
+                let _slot = matches!(message, CdpOutgoing::Text { .. })
+                    .then(|| CdpWriteSlot(&write_budget));
                 match message {
                     CdpOutgoing::Text {
                         payload,
@@ -27030,7 +27188,7 @@ impl CdpClient {
         });
 
         Ok(Arc::new(Self {
-            write_tx,
+            write_tx: write_tx.into(),
             pending,
             outstanding,
             events,
@@ -27054,6 +27212,8 @@ impl CdpClient {
         mut pipe_write: fs::File,
     ) -> RwResult<Arc<Self>> {
         let (write_tx, mut write_rx) = mpsc::unbounded_channel::<CdpOutgoing>();
+        let write_tx = CdpWriteTx::limited(write_tx);
+        let write_budget = Arc::clone(&write_tx.budget);
         let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<Value>();
         let pending: CdpPendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_dispatcher = Arc::clone(&pending);
@@ -27088,6 +27248,8 @@ impl CdpClient {
 
         tokio::task::spawn_blocking(move || {
             while let Some(message) = write_rx.blocking_recv() {
+                let _slot = matches!(message, CdpOutgoing::Text { .. })
+                    .then(|| CdpWriteSlot(&write_budget));
                 match message {
                     CdpOutgoing::Text {
                         payload,
@@ -27193,7 +27355,7 @@ impl CdpClient {
         });
 
         Ok(Arc::new(Self {
-            write_tx,
+            write_tx: write_tx.into(),
             pending,
             outstanding,
             events,
@@ -27289,6 +27451,19 @@ impl CdpClient {
         self.alive.store(false, Ordering::SeqCst);
         self.alive_tx.send_replace(false);
         let _ = self.write_tx.send(CdpOutgoing::Close);
+    }
+
+    fn send_outgoing(&self, outgoing: CdpOutgoing) -> RwResult<()> {
+        match self.write_tx.enqueue(outgoing) {
+            Ok(()) => Ok(()),
+            Err(CdpWriteEnqueueError::Closed) => {
+                self.mark_closed();
+                Err(RwError::Disconnected)
+            }
+            Err(CdpWriteEnqueueError::QueueFull) => Err(RwError::Message(
+                "CDP write queue is full".to_string(),
+            )),
+        }
     }
 
     fn mark_closed(&self) {
@@ -27469,16 +27644,15 @@ impl CdpClient {
             // Event insertion and command enqueue share this mutex boundary, so every
             // stamped event is ordered unambiguously before or after the command.
             let _event_log = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.write_tx.send(CdpOutgoing::Text {
+            self.send_outgoing(CdpOutgoing::Text {
                 payload: payload.to_string(),
                 tracker: None,
                 diagnostic_id: Some(id),
             })
         };
-        if send_result.is_err() {
+        if let Err(error) = send_result {
             drop(retention_guard);
-            self.mark_closed();
-            return Err(RwError::Disconnected);
+            return Err(error);
         }
         self.record_sent_command(method);
         drop(retention_guard);
@@ -27615,14 +27789,13 @@ impl CdpClient {
                 // unambiguously before or after this command send.
                 let event_log = self.event_log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 *cursor = event_log.cursor();
-                self.write_tx.send(outgoing)
+                self.send_outgoing(outgoing)
             }
-            None => self.write_tx.send(outgoing),
+            None => self.send_outgoing(outgoing),
         };
-        if send_result.is_err() {
+        if let Err(error) = send_result {
             drop(retention_guard);
-            self.mark_closed();
-            return Err(RwError::Disconnected);
+            return Err(error);
         }
         self.record_sent_command(method);
         drop(retention_guard);
@@ -27682,18 +27855,13 @@ impl CdpClient {
             format!("{{\"id\":{id},\"method\":{method_json},\"params\":{params_json}}}")
         };
 
-        if self
-            .write_tx
-            .send(CdpOutgoing::Text {
-                payload,
-                tracker: None,
-                diagnostic_id: Some(id),
-            })
-            .is_err()
-        {
+        if let Err(error) = self.send_outgoing(CdpOutgoing::Text {
+            payload,
+            tracker: None,
+            diagnostic_id: Some(id),
+        }) {
             drop(retention_guard);
-            self.mark_closed();
-            return Err(RwError::Disconnected);
+            return Err(error);
         }
         self.record_sent_command(method);
         drop(retention_guard);
@@ -27761,18 +27929,13 @@ impl CdpClient {
                 format!("{{\"id\":{id},\"method\":{method_json},\"params\":{params_json}}}")
             };
 
-            if self
-                .write_tx
-                .send(CdpOutgoing::Text {
-                    payload,
-                    tracker: None,
-                    diagnostic_id: Some(id),
-                })
-                .is_err()
-            {
+            if let Err(error) = self.send_outgoing(CdpOutgoing::Text {
+                payload,
+                tracker: None,
+                diagnostic_id: Some(id),
+            }) {
                 drop(retention_guard);
-                self.mark_closed();
-                return Err(RwError::Disconnected);
+                return Err(error);
             }
             self.record_sent_command(method);
             receivers.push((id, rx, pending_guard));
@@ -35896,17 +36059,24 @@ impl Drop for FillGuardDropCleanup {
         let runtime = self.runtime.clone();
         let page = Arc::clone(&self.page);
         let guard_key = self.guard_key.clone();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _ = runtime.spawn(async move {
-                let _ = cleanup_fill_guard_after_success(
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            runtime.spawn(async move {
+                if let Err(error) = cleanup_fill_guard_after_success(
                     &page,
                     &resolution,
                     &guard_key,
                     Duration::from_millis(250),
                 )
-                .await;
+                .await
+                {
+                    eprintln!("rustwright: fill-guard drop cleanup failed: {error}");
+                }
             });
-        }));
+        }))
+        .is_err()
+        {
+            eprintln!("rustwright: fill-guard drop cleanup could not be scheduled");
+        }
     }
 }
 
@@ -44891,7 +45061,7 @@ impl RustwrightNavigationHarness {
         let event_log = Arc::new(Mutex::new(CdpEventLog::new()));
         let (alive_tx, _) = watch::channel(true);
         let client = Arc::new(CdpClient {
-            write_tx,
+            write_tx: write_tx.into(),
             pending: Arc::clone(&pending),
             outstanding: Arc::new(Mutex::new(HashMap::new())),
             events: events.clone(),
@@ -51689,7 +51859,7 @@ mod native_console_record_tests {
         let browser = Arc::new(BrowserInner {
             runtime: OwnedRuntime(None),
             client: Arc::new(CdpClient {
-                write_tx,
+                write_tx: write_tx.into(),
                 pending: Arc::clone(&pending),
                 outstanding: Arc::new(Mutex::new(HashMap::new())),
                 events: events.clone(),

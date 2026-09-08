@@ -384,7 +384,7 @@ fn selected_url_record(tabs: &TabsStructure, exact: bool) -> Option<String> {
         if exact {
             format!(
                 "Exact active URL JSON: {}",
-                serde_json::to_string(url).expect("serializing a string cannot fail")
+                serde_json::to_string(url).unwrap_or_else(|_| format!("{url:?}"))
             )
         } else {
             format!(
