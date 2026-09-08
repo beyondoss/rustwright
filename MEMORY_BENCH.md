@@ -57,9 +57,12 @@ Measured on linux x86_64 against a fat-LTO baseline (host-safe; no Chromium):
 - MCP process VmRSS median: 6340 KiB → 5416 KiB (−14.6%)
 - Protocol microbench median stayed within noise
 
-When attaching `rustwright-mcp` to a GitHub Release on a native host/target,
-prefer `tools/build_mcp_pgo.sh` over a plain `cargo build --release`. Cross
-builds without a matching native PGO train stay on the non-PGO release profile.
+When attaching `rustwright-mcp` to a GitHub Release on a native-runnable
+host/target, prefer `tools/build_mcp_pgo.sh` over a plain `cargo build
+--release`. Release CI does this for Darwin arm64 and for Linux musl on
+same-arch runners. Cross builds without a runnable train (today:
+`x86_64-apple-darwin` on arm64 macOS) stay on the non-PGO release profile.
+Same-arch `*-linux-musl` on a GNU host is treated as native-runnable for PGO.
 
 For repeated runs, the raw peak remains in every `results` item and `aggregate`
 contains distribution summaries for both RSS fields. Benchmark output belongs

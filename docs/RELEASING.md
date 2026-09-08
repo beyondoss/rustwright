@@ -66,7 +66,7 @@ attaching binaries to the GitHub Release — not registry Trusted Publishing.
       itself; there is no in-repo changelog). Publishing the Release triggers
       `.github/workflows/release.yml`, which builds and uploads:
       - `rustwright-cli-<target>` for the four triples `install.sh` understands
-        (`x86_64` / `aarch64` × `unknown-linux-gnu` / `apple-darwin`)
+        (`x86_64` / `aarch64` × `unknown-linux-musl` / `apple-darwin`)
       - matching `rustwright-mcp-<target>` assets
 - [ ] Confirm the Release assets appear, then that `install.sh` (or an
       equivalent curl install path) downloads the new CLI asset on a clean
@@ -77,11 +77,11 @@ the workflow), run **Actions → Release binaries → Run workflow** and pass th
 tag (`v0.1.0`). Uploads use `--clobber`, so re-runs replace prior assets.
 
 `cli/` and `mcp/` version independently from the shared library version when
-needed. Linux GNU targets are linked with Zig against glibc 2.17 for broader
-distro coverage (same approach as the former npm native builds).
+needed.
 
-For a one-off native-host `rustwright-mcp` build with measured size / RSS wins,
-prefer `tools/build_mcp_pgo.sh` (fat LTO + profile-guided optimization;
-host-safe training, no browser) and upload that binary manually. See
-`MEMORY_BENCH.md`. CI release assets stay on the plain release profile so
-cross targets and PGO training do not block publishing.
+Linux assets are **static musl** binaries (Zig-linked). Darwin assets use the
+normal Apple dynamic link. Native-host MCP builds (Darwin arm64, Linux musl on
+matching arch runners including `ubuntu-24.04-arm`) go through
+`tools/build_mcp_pgo.sh`. Cross MCP targets without a runnable train stay on
+the plain release profile — today that is only `x86_64-apple-darwin` when
+built on arm64 macOS. See `MEMORY_BENCH.md` for measured PGO deltas.

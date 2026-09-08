@@ -105,10 +105,9 @@ Skip this section in prepare-only mode.
 4. Create (or publish) the GitHub Release for `v<version>`. That triggers
    `.github/workflows/release.yml`, which builds and uploads the
    `rustwright-cli-<target>` / `rustwright-mcp-<target>` assets documented in
-   `docs/RELEASING.md`. Wait for that workflow to finish; do not hand-build
-   unless CI is broken. To backfill an existing empty Release, dispatch the
-   workflow with the tag. Optional native-host PGO for MCP remains
-   `tools/build_mcp_pgo.sh` outside CI.
+   `docs/RELEASING.md` (static Linux musl; PGO for native-runnable MCP). Wait
+   for that workflow to finish; do not hand-build unless CI is broken. To
+   backfill an existing empty Release, dispatch the workflow with the tag.
 
 ## 5. Verify and report
 

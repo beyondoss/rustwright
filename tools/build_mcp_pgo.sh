@@ -4,8 +4,13 @@
 #
 # Environment:
 #   RUSTWRIGHT_PGO_TOOLCHAIN  rustup toolchain (default: stable)
-#   RUSTWRIGHT_PGO_TARGET     rustc target triple (default: host)
+#   RUSTWRIGHT_PGO_TARGET     rustc target triple (default: host). Same-arch
+#                             Linux musl on a GNU host is allowed for static
+#                             release assets; other cross targets are rejected.
 #   PGO_PROFILE_DIR           profile scratch dir
+#
+# For musl targets, configure a musl-capable linker first (release CI sets the
+# Zig shim via CARGO_TARGET_*_LINKER / CC_*).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,8 +23,20 @@ host_triple="$(rustc "+${toolchain}" -vV | sed -n 's/^host: //p')"
 if [[ -z "$target" ]]; then
   target="$host_triple"
 fi
-if [[ "$target" != "$host_triple" ]]; then
-  echo "PGO build requires a native target (host=${host_triple}, target=${target})" >&2
+
+# PGO needs a runnable binary on this host. Exact host triples are fine; so is
+# same-arch Linux musl on a GNU host (static musl binaries run there).
+pgo_target_ok=0
+if [[ "$target" == "$host_triple" ]]; then
+  pgo_target_ok=1
+else
+  case "${host_triple}/${target}" in
+    x86_64-unknown-linux-gnu/x86_64-unknown-linux-musl) pgo_target_ok=1 ;;
+    aarch64-unknown-linux-gnu/aarch64-unknown-linux-musl) pgo_target_ok=1 ;;
+  esac
+fi
+if [[ "$pgo_target_ok" -ne 1 ]]; then
+  echo "PGO build requires a native-runnable target (host=${host_triple}, target=${target})" >&2
   exit 2
 fi
 

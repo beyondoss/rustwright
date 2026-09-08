@@ -1,8 +1,10 @@
 name: Release binaries
 
 # Build rustwright-cli / rustwright-mcp for the targets install.sh understands
-# and attach them to the GitHub Release. Publishing a Release used to do
-# nothing because registry workflows were removed without a replacement.
+# and attach them to the GitHub Release.
+#
+# Linux assets are static musl binaries (via Zig). Native-host MCP builds use
+# tools/build_mcp_pgo.sh; cross MCP builds stay on the plain release profile.
 
 on:
   release:
@@ -38,38 +40,46 @@ jobs:
             target: aarch64-apple-darwin
             runner: macos-15
             zig: false
+            pgo: false
           - crate: cli
             target: x86_64-apple-darwin
             runner: macos-15
             zig: false
+            pgo: false
           - crate: cli
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
             zig: true
-            zig_target: x86_64-unknown-linux-gnu.2.17
+            zig_target: x86_64-unknown-linux-musl
+            pgo: false
           - crate: cli
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
             zig: true
-            zig_target: aarch64-unknown-linux-gnu.2.17
+            zig_target: aarch64-unknown-linux-musl
+            pgo: false
           - crate: mcp
             target: aarch64-apple-darwin
             runner: macos-15
             zig: false
+            pgo: true
           - crate: mcp
             target: x86_64-apple-darwin
             runner: macos-15
             zig: false
+            pgo: false
           - crate: mcp
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
             zig: true
-            zig_target: x86_64-unknown-linux-gnu.2.17
+            zig_target: x86_64-unknown-linux-musl
+            pgo: true
           - crate: mcp
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
             zig: true
-            zig_target: aarch64-unknown-linux-gnu.2.17
+            zig_target: aarch64-unknown-linux-musl
+            pgo: true
 
     steps:
       - name: Check out repository
@@ -108,6 +118,7 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+          components: llvm-tools-preview
 
       - name: Set up Zig
         if: ${{ matrix.zig }}
@@ -116,7 +127,7 @@ jobs:
           version: 0.14.1
 
       - name: Install cargo-zigbuild
-        if: ${{ matrix.zig }}
+        if: ${{ matrix.zig && !matrix.pgo }}
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
           tool: cargo-zigbuild@0.23.0
@@ -134,10 +145,15 @@ jobs:
 
       - name: Build ${{ matrix.crate }} (${{ matrix.target }})
         shell: bash
+        env:
+          RUSTWRIGHT_PGO_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           manifest="${{ matrix.crate }}/Cargo.toml"
-          if [ "${{ matrix.zig }}" = "true" ]; then
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            test "${{ matrix.crate }}" = "mcp"
+            tools/build_mcp_pgo.sh
+          elif [ "${{ matrix.zig }}" = "true" ]; then
             cargo zigbuild --release --locked --manifest-path "$manifest" \
               --target "${{ matrix.zig_target }}"
           else
@@ -167,6 +183,17 @@ jobs:
           mkdir -p dist
           cp "$src" "dist/${asset}"
           chmod +x "dist/${asset}"
+
+          case "${{ matrix.target }}" in
+            *-linux-musl)
+              if command -v ldd >/dev/null 2>&1 && ldd "dist/${asset}" >/dev/null 2>&1; then
+                echo "::error::expected a static musl binary, but ldd resolved dynamic deps:"
+                ldd "dist/${asset}" || true
+                exit 1
+              fi
+              ;;
+          esac
+
           echo "path=dist/${asset}" >> "$GITHUB_OUTPUT"
           echo "name=${asset}" >> "$GITHUB_OUTPUT"
           ls -lh "dist/${asset}"
