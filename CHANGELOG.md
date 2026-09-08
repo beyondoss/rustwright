@@ -16,6 +16,9 @@ All notable user-facing changes to Rustwright are documented in this file.
 
 ### Changed
 
+- Removed repository `AGENTS.md` (and its public-mirror sync entry). Release and
+  CI guidance stays in GitHub Actions workflows and `docs/RELEASING.md`.
+
 - Cut long-session retained memory cost: network `post_data` / console args /
   request headers share the 8 KiB CDP retention budget (page-owned stores and
   event-log retain); screenshot path writes reuse the decoded buffer;
