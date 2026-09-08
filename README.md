@@ -4,13 +4,13 @@
 
 **A Rust rewrite of Playwright's browser engine**, speaking raw [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) in-process — **[2.55× faster](#benchmarks)** and **[70% less memory](BENCHMARK.md#client-memory-form-fill-diagnostic)** than Playwright's Node-driver stack, with no Playwright automation fingerprint. Alpha; Chromium-only.
 
-This fork ships **native binaries** (CLI + MCP) as GitHub Release assets. It does **not** publish to PyPI, npm, or other language registries.
+This repository ships **native binaries** (CLI + MCP) as GitHub Release assets.
+It does **not** publish to PyPI, npm, or other language registries.
 
 [![status: alpha](https://img.shields.io/badge/status-alpha-orange)](#project-status)
 [![tests](https://img.shields.io/github/actions/workflow/status/beyondoss/rustwright/test.yml?label=tests)](https://github.com/beyondoss/rustwright/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Chromium only](https://img.shields.io/badge/browser-Chromium-4285F4?logo=googlechrome&logoColor=white)](#limitations)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fG2XXEuQX3)
 
 </div>
 
@@ -89,8 +89,7 @@ See [`mcp/README.md`](mcp/README.md) for tools and configuration.
 ### Browser
 
 Rustwright launches Chromium itself. Use a system Chrome/Chromium, or set
-`RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM` to an executable path. There is
-no npm or `pip install` browser bootstrap in this distribution path.
+`RUSTWRIGHT_CHROMIUM`, `CHROME`, or `CHROMIUM` to an executable path.
 
 ## Why Rustwright?
 
@@ -119,23 +118,13 @@ The MCP and CLI sections above are the supported agent paths. Setting up via an 
 `https://raw.githubusercontent.com/beyondoss/rustwright/HEAD/mcp/README.md`
 and follow it.
 
-## Remote browsers (Skyvern)
+## Remote Chromium
 
-Rustwright drives browsers — but you still need somewhere to run them. Skyvern (the team behind upstream Rustwright) offers hosted **[Browser Sessions](https://www.skyvern.com/docs/developers/features/browser-sessions)** as a paid service.
-
-**Features:**
-
-- **Persistent cloud browsers** — logins, cookies, and tab state carry across runs
-- **Configurable timeouts** — 5 minutes to 24 hours (60 min default)
-- **Proxies in 21 countries**
-- **Live view** — watch and interact with the session in the Skyvern Cloud UI
-
-Each session returns a `browser_address` CDP endpoint. Connect with
-`chromium.connect_over_cdp()` from a language binding, or point compatible
-tooling at that endpoint. See the [remote-browser guide](docs/REMOTE_BROWSERS.md)
-for migration steps, endpoint diagnostics, and security guidance.
-
-**Get started:** make an account at [app.skyvern.com](https://app.skyvern.com) and grab an API key from **Settings**.
+To drive an already-running Chromium over CDP, use
+`chromium.connect_over_cdp()` from a language binding (or point compatible
+tooling at the endpoint). See the [remote-browser guide](docs/REMOTE_BROWSERS.md)
+for endpoint shape, diagnostics, and security notes.
+`BrowserType.connect()` is not a CDP alias.
 
 ## Automation detection
 
@@ -192,7 +181,7 @@ See [`LIMITATIONS.md`](LIMITATIONS.md) for detail.
 - **Chromium only** — Firefox and WebKit error explicitly.
 - **OOPIF** — residual gaps in non-main-frame `JSHandle` follow-ups and drag/screenshot/bounding-box.
 - **Automation detection is partial** — 3 of 4 public fingerprint targets clean in local runs (CreepJS still detects headless). **No undetectability promise.**
-- **No registry packages in this fork** — distribution is GitHub Release binaries / source builds, not PyPI or npm.
+- **No registry packages here** — distribution is GitHub Release binaries / source builds, not PyPI or npm.
 
 ## Roadmap
 
@@ -217,9 +206,8 @@ Rustwright is a Rust workspace: `cargo` builds the engine, CLI, MCP server, and 
 
 ## Project status
 
-Rustwright is an early alpha, originally from [Skyvern](https://github.com/Skyvern-AI), developed in the open. If the architecture resonates, [give it a ⭐](https://github.com/beyondoss/rustwright).
-
-Questions, ideas, or want to help? Join the Skyvern community on [**Discord**](https://discord.gg/fG2XXEuQX3).
+Rustwright is an early alpha, developed in the open. If the architecture
+resonates, [give it a ⭐](https://github.com/beyondoss/rustwright).
 
 ## Telemetry
 
@@ -235,8 +223,8 @@ export DISABLE_TELEMETRY=1   # or DO_NOT_TRACK=1
 
 ## License
 
-[MIT](LICENSE) © 2026 Ikonomos Inc (dba Skyvern)
+[MIT](LICENSE)
 
 <div align="center">
-<sub>Built with 🦀🐉 and a lot of CDP frames · <a href="https://github.com/beyondoss/rustwright">beyondoss/rustwright</a></sub>
+<sub>Built with 🦀 and a lot of CDP frames · <a href="https://github.com/beyondoss/rustwright">beyondoss/rustwright</a></sub>
 </div>
