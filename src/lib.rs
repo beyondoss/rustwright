@@ -454,6 +454,11 @@ impl Drop for SpawnedTaskAbortGuard {
 const CDP_EVENT_LOG_LIMIT: usize = 8192;
 const CDP_EVENT_LOG_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CDP_EVENT_LOG_MAX_ENTRY_BYTES: usize = 64 * 1024;
+/// Soft idle watermark for long-lived sessions. Peak traffic may still fill
+/// up to `CDP_EVENT_LOG_MAX_*`; `trim_retained_idle` drains back to these.
+const CDP_EVENT_LOG_IDLE_MAX_BYTES: usize = 1024 * 1024;
+const CDP_EVENT_LOG_IDLE_MAX_ENTRIES: usize = 1024;
+const NETWORK_REQUEST_IDLE_MAX_ENTRIES: usize = 1024;
 const CDP_RETAINED_STRING_MAX_BYTES: usize = 8 * 1024;
 const CDP_RETAINED_ARRAY_MAX_ITEMS: usize = 128;
 const CDP_DIAGNOSTIC_TRAFFIC_LIMIT: usize = 32;
@@ -11567,13 +11572,12 @@ true
 
             let main_result = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
                 r#"
 this.scrollIntoView();
 return this.dataset.mainWorldOverride === "observed";
-"#
-                .to_string(),
+"#,
                 Duration::from_millis(500),
             )
             .await
@@ -11582,14 +11586,14 @@ return this.dataset.mainWorldOverride === "observed";
 
             let frame_result = evaluate_locator_for_page(
                 page,
-                json!({
+                &json!({
                     "kind": "frame",
                     "frame_selector": "iframe",
                     "inner": {"kind": "css", "selector": "button"}
                 })
                 .to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -11670,7 +11674,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -11710,9 +11714,9 @@ return this.dataset.mainWorldOverride === "observed";
         let operations = async move {
             let action = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(250),
             )
             .await
@@ -11828,11 +11832,12 @@ return this.dataset.mainWorldOverride === "observed";
         }));
 
         let page = Arc::clone(&harness.page);
+        let locator_json = json!({"kind": "css", "selector": "#target"}).to_string();
         let action = evaluate_locator_for_page(
             page,
-            json!({"kind": "css", "selector": "#target"}).to_string(),
+            &locator_json,
             0,
-            "return true;".to_string(),
+            "return true;",
             Duration::from_millis(500),
         );
         let result_page = Arc::clone(&harness.page);
@@ -12075,9 +12080,9 @@ return this.dataset.mainWorldOverride === "observed";
 
             let first = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -12119,9 +12124,9 @@ return this.dataset.mainWorldOverride === "observed";
 
             let second = evaluate_locator_for_page(
                 Arc::clone(&page),
-                json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string(),
                 0,
-                "return true;".to_string(),
+                "return true;",
                 Duration::from_millis(500),
             )
             .await
@@ -12318,7 +12323,7 @@ return this.dataset.mainWorldOverride === "observed";
         let operations = async move {
             resolve_locator_session(
                 Arc::clone(&page),
-                &json!({"kind": "css", "selector": "#target"}).to_string(),
+                &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                 OperationDeadline::new(Duration::from_millis(250)),
             )
             .await
@@ -12340,7 +12345,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -12366,7 +12371,7 @@ return this.dataset.mainWorldOverride === "observed";
             for _ in 0..2 {
                 resolve_locator_session(
                     Arc::clone(&page),
-                    &json!({"kind": "css", "selector": "#target"}).to_string(),
+                    &json!({"kind": "css", "selector": "#target"}).to_string().to_string(),
                     OperationDeadline::new(Duration::from_millis(250)),
                 )
                 .await
@@ -16134,16 +16139,17 @@ return this.dataset.mainWorldOverride === "observed";
 
         let page = Arc::clone(&harness.page);
         let responder_page = Arc::clone(&harness.page);
+        let locator_json = json!({
+            "kind": "frame",
+            "frame_selector": "iframe",
+            "inner": {"kind": "css", "selector": "button"}
+        })
+        .to_string();
         let action = evaluate_locator_for_page(
             page,
-            json!({
-                "kind": "frame",
-                "frame_selector": "iframe",
-                "inner": {"kind": "css", "selector": "button"}
-            })
-            .to_string(),
+            &locator_json,
             0,
-            "return true;".to_string(),
+            "return true;",
             Duration::from_millis(750),
         );
         let responder = async move {
@@ -23010,6 +23016,189 @@ return this.dataset.mainWorldOverride === "observed";
         assert!(log.retained_bytes <= CDP_EVENT_LOG_MAX_BYTES);
         assert_eq!(log.cursor_after_event(0, &live), 1);
     }
+
+    #[test]
+    fn retained_network_and_console_payloads_share_the_string_budget() {
+        let post = "p".repeat(CDP_RETAINED_STRING_MAX_BYTES * 2);
+        let request = request_from_event(
+            &json!({
+                "params": {
+                    "requestId": "req-1",
+                    "loaderId": "loader-1",
+                    "frameId": "frame-1",
+                    "timestamp": 1.0,
+                    "wallTime": 1.0,
+                    "type": "Fetch",
+                    "documentURL": "https://example.test/",
+                    "request": {
+                        "url": "https://example.test/submit",
+                        "method": "POST",
+                        "headers": {},
+                        "postData": post,
+                        "postDataEntries": [{ "bytes": post }],
+                    }
+                }
+            }),
+            None,
+        )
+        .expect("request snapshot");
+        assert_eq!(
+            request
+                .get("post_data")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        assert_eq!(
+            request
+                .pointer("/post_data_entries/0/bytes")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        let cookie = format!("session={}", "c".repeat(CDP_RETAINED_STRING_MAX_BYTES));
+        let request_with_headers = request_from_event(
+            &json!({
+                "params": {
+                    "requestId": "req-headers",
+                    "loaderId": "loader-1",
+                    "frameId": "frame-1",
+                    "timestamp": 1.0,
+                    "wallTime": 1.0,
+                    "type": "Fetch",
+                    "documentURL": "https://example.test/",
+                    "request": {
+                        "url": "https://example.test/",
+                        "method": "GET",
+                        "headers": { "Cookie": cookie },
+                    }
+                }
+            }),
+            None,
+        )
+        .expect("request snapshot with headers");
+        assert_eq!(
+            request_with_headers
+                .pointer("/headers/Cookie")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        let native_headers = metadata_headers(Some(&json!({
+            "Cookie": format!("session={}", "n".repeat(CDP_RETAINED_STRING_MAX_BYTES * 2)),
+            "X-Small": "ok",
+        })));
+        assert_eq!(
+            native_headers
+                .iter()
+                .find(|(name, _)| name == "Cookie")
+                .map(|(_, value)| value.len()),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+        assert_eq!(
+            native_headers
+                .iter()
+                .find(|(name, _)| name == "X-Small")
+                .map(|(_, value)| value.as_str()),
+            Some("ok")
+        );
+        assert_eq!(
+            console_arg_value(&json!({ "type": "string", "value": post })),
+            Value::String("p".repeat(CDP_RETAINED_STRING_MAX_BYTES))
+        );
+
+        let mut log = CdpEventLog::new();
+        let live = log.push(json!({
+            "sessionId": "page-session",
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": "req-1",
+                "request": {
+                    "url": "https://example.test/submit",
+                    "method": "POST",
+                    "postData": post,
+                }
+            }
+        }));
+        assert_eq!(
+            live.pointer("/params/request/postData")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES * 2)
+        );
+        let retained = log.entries_since(0);
+        assert_eq!(
+            retained[0]
+                .1
+                .pointer("/params/request/postData")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(CDP_RETAINED_STRING_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn trim_retained_idle_drains_event_log_below_soft_watermark() {
+        let mut log = CdpEventLog::new();
+        // Keep entries small so the hard 8 MiB / 8192 caps do not hide the soft
+        // idle watermark under test.
+        for index in 0..(CDP_EVENT_LOG_IDLE_MAX_ENTRIES * 2) {
+            log.push(json!({
+                "sessionId": "page-session",
+                "method": "Runtime.consoleAPICalled",
+                "params": {
+                    "type": "log",
+                    "args": [{ "type": "string", "value": format!("msg-{index}") }]
+                }
+            }));
+        }
+        assert_eq!(log.events.len(), CDP_EVENT_LOG_IDLE_MAX_ENTRIES * 2);
+        let before_bytes = log.retained_bytes;
+        assert!(before_bytes > 0);
+        log.trim_retained_idle();
+        assert!(log.events.len() <= CDP_EVENT_LOG_IDLE_MAX_ENTRIES);
+        assert!(log.retained_bytes <= before_bytes);
+        assert!(log.retained_bytes < before_bytes);
+    }
+
+    #[test]
+    fn trim_retained_idle_bounds_network_request_store() {
+        let mut store = NetworkRequestStore::new(0);
+        for index in 0..(NETWORK_REQUEST_IDLE_MAX_ENTRIES + 32) {
+            let request_id = format!("req-{index}");
+            let request = json!({
+                "request_id": request_id,
+                "url": format!("https://example.test/{index}"),
+                "method": "GET",
+                "headers": {},
+                "post_data": Value::Null,
+            });
+            store.requests.insert(
+                request_id.clone(),
+                NetworkRequestEntry {
+                    current: NetworkRequestSnapshot {
+                        seq: index as u64,
+                        request: request.clone(),
+                        redirect_ancestry: Vec::new(),
+                    },
+                    applied_by_seq: BTreeMap::from([(
+                        index as u64,
+                        NetworkRequestSnapshot {
+                            seq: index as u64,
+                            request,
+                            redirect_ancestry: Vec::new(),
+                        },
+                    )]),
+                },
+            );
+            store.record_applied_request(index as u64, request_id);
+        }
+        assert!(store.applied_order.len() > NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+        store.trim_retained_idle();
+        assert!(store.applied_order.len() <= NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+        assert!(store.requests.len() <= NETWORK_REQUEST_IDLE_MAX_ENTRIES);
+    }
+
     #[test]
     fn cdp_event_log_tombstones_payloads_that_remain_oversized_after_compaction() {
         let mut log = CdpEventLog::new();
@@ -25579,6 +25768,120 @@ fn compact_retained_cdp_value(value: &mut Value) {
     }
 }
 
+fn truncate_retained_string(text: &str) -> String {
+    if text.len() <= CDP_RETAINED_STRING_MAX_BYTES {
+        return text.to_owned();
+    }
+    let mut end = CDP_RETAINED_STRING_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+fn retained_headers(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Object(headers)) => {
+            let mut retained = serde_json::Map::with_capacity(headers.len());
+            for (name, header_value) in headers {
+                let text = match header_value {
+                    Value::String(text) => truncate_retained_string(text),
+                    other => truncate_retained_string(&other.to_string()),
+                };
+                retained.insert(name.clone(), Value::String(text));
+            }
+            Value::Object(retained)
+        }
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => json!({}),
+    }
+}
+
+fn retained_json_string(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(text)) => Value::String(truncate_retained_string(text)),
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => Value::Null,
+    }
+}
+
+fn retained_post_data_entries(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Array(entries)) => {
+            let mut retained = Vec::with_capacity(entries.len().min(CDP_RETAINED_ARRAY_MAX_ITEMS));
+            for entry in entries.iter().take(CDP_RETAINED_ARRAY_MAX_ITEMS) {
+                let mut entry = entry.clone();
+                if let Some(object) = entry.as_object_mut() {
+                    if let Some(Value::String(text)) = object.get_mut("bytes") {
+                        *text = truncate_retained_string(text);
+                    } else {
+                        for value in object.values_mut() {
+                            compact_retained_cdp_value(value);
+                        }
+                    }
+                } else {
+                    compact_retained_cdp_value(&mut entry);
+                }
+                retained.push(entry);
+            }
+            Value::Array(retained)
+        }
+        Some(other) => {
+            let mut value = other.clone();
+            compact_retained_cdp_value(&mut value);
+            value
+        }
+        None => Value::Null,
+    }
+}
+
+/// Drop payloads that are already mirrored in page-owned stores (network POST
+/// bodies, console args) so the browser-lifetime event log cannot idle-retain
+/// duplicates even when the raw event is under the per-entry byte budget.
+fn strip_retained_heavy_payloads(event: &mut Value) {
+    let method = event
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match method.as_str() {
+        "Network.requestWillBeSent" => {
+            if let Some(request) = event.pointer_mut("/params/request") {
+                if let Some(object) = request.as_object_mut() {
+                    if let Some(Value::String(text)) = object.get_mut("postData") {
+                        *text = truncate_retained_string(text);
+                    }
+                    if let Some(entries) = object.get_mut("postDataEntries") {
+                        *entries = retained_post_data_entries(Some(entries));
+                    }
+                    // Cookie / auth headers dominate retained request size; keep
+                    // catch-up shape but bound each header value to the shared
+                    // string budget.
+                    if let Some(Value::Object(headers)) = object.get_mut("headers") {
+                        for value in headers.values_mut() {
+                            compact_retained_cdp_value(value);
+                        }
+                    }
+                }
+            }
+        }
+        "Runtime.consoleAPICalled" => {
+            if let Some(args) = event.pointer_mut("/params/args") {
+                compact_retained_cdp_value(args);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct CountingWriter {
     bytes: usize,
 }
@@ -25740,6 +26043,7 @@ fn retained_cdp_event_params(method: &str, params: &Value) -> Option<Value> {
 }
 
 fn compact_retained_cdp_event(mut event: Value) -> (Value, usize) {
+    strip_retained_heavy_payloads(&mut event);
     let original_size = retained_cdp_event_size(&event);
     if original_size <= CDP_EVENT_LOG_MAX_ENTRY_BYTES {
         return (event, original_size);
@@ -26003,6 +26307,22 @@ impl CdpEventLog {
         self.console_replay_cutoffs = HashMap::new();
         self.console_replay_cutoff_generations = HashMap::new();
         self.console_replay_cutoff_cancellations = HashMap::new();
+    }
+
+    /// Drain retained events back to the soft idle watermark without disabling
+    /// retention. Safe to call while the browser stays open (agent/MCP between
+    /// tools). Dropped events may force catch-up overflow resets for lagging
+    /// subscribers — the same outcome as natural log eviction at the hard caps.
+    fn trim_retained_idle(&mut self) {
+        while self.events.len() > CDP_EVENT_LOG_IDLE_MAX_ENTRIES
+            || self.retained_bytes > CDP_EVENT_LOG_IDLE_MAX_BYTES
+        {
+            let Some(evicted) = self.events.pop_front() else {
+                break;
+            };
+            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.retained_bytes);
+        }
+        self.prune_console_replay_cutoffs();
     }
 
     fn entries_since(&self, cursor: u64) -> Vec<(u64, Value)> {
@@ -28665,6 +28985,36 @@ impl PageInner {
             .store(false, Ordering::SeqCst);
     }
 
+    /// Soft-trim page-owned retained stores and the shared CDP event log back
+    /// toward idle watermarks without closing the page or disabling retention.
+    fn trim_retained_memory(&self) {
+        if self.lifecycle.is_closing_or_closed() || self.target_closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let retention_gate = self.browser.client.retention_gate();
+        let Some(_retention_guard) = retention_gate.lock_for_write() else {
+            return;
+        };
+        self.browser
+            .client
+            .event_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.network_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.console_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+        self.native_network_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .trim_retained_idle();
+    }
+
     fn close_in_background(&self) {
         self.clear_worker_resume_handoffs();
         self.abort_iframe_setup_tasks();
@@ -28770,6 +29120,29 @@ impl NetworkRequestStore {
     }
     fn clear_for_close(&mut self) {
         self.reset_after_overflow(self.next_applied_seq);
+    }
+
+    fn trim_retained_idle(&mut self) {
+        while self.applied_order.len() > NETWORK_REQUEST_IDLE_MAX_ENTRIES {
+            let Some((oldest_seq, oldest_request_id)) = self.applied_order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.requests.get_mut(&oldest_request_id) {
+                entry.applied_by_seq.remove(&oldest_seq);
+                if let Some((_, newest)) = entry.applied_by_seq.last_key_value() {
+                    entry.current = newest.clone();
+                }
+            }
+        }
+        self.requests.retain(|_, entry| {
+            if entry.applied_by_seq.is_empty() {
+                return false;
+            }
+            if let Some((_, newest)) = entry.applied_by_seq.last_key_value() {
+                entry.current = newest.clone();
+            }
+            true
+        });
     }
 
     fn record_applied_request(&mut self, seq: u64, request_id: String) {
@@ -28949,6 +29322,20 @@ impl ConsoleRecordStore {
         self.evictions_by_epoch = HashMap::new();
         self.evictions_total = 0;
     }
+
+    fn trim_retained_idle(&mut self) {
+        let epoch = self.navigation_epoch;
+        let before = self.records.len();
+        self.records
+            .retain(|record| record.navigation_epoch == epoch);
+        let dropped = before.saturating_sub(self.records.len()) as u64;
+        if dropped > 0 {
+            self.evictions_total = self.evictions_total.saturating_add(dropped);
+        }
+        self.evictions_by_epoch
+            .retain(|stored_epoch, _| *stored_epoch == epoch);
+    }
+
     fn reset_after_unreplayable(&mut self) {
         let epoch = self.navigation_epoch;
         self.accepted_navigation_epochs = AcceptedNavigationEpochs::default();
@@ -29097,6 +29484,24 @@ impl NativeNetworkRecordStore {
         self.active_by_request = HashMap::new();
         self.evictions_by_epoch = HashMap::new();
     }
+
+    fn trim_retained_idle(&mut self) {
+        let epoch = self.navigation_epoch;
+        let before = self.records.len();
+        self.records.retain(|entry| entry.record.navigation_epoch == epoch);
+        let dropped = before.saturating_sub(self.records.len());
+        if dropped > 0 {
+            *self.evictions_by_epoch.entry(epoch).or_default() += dropped as u64;
+        }
+        self.active_by_request.retain(|_, index| {
+            self.records
+                .iter()
+                .any(|entry| entry.record.index == *index)
+        });
+        self.evictions_by_epoch
+            .retain(|stored_epoch, _| *stored_epoch == epoch);
+    }
+
     fn reset_after_unreplayable(&mut self) {
         let epoch = self.navigation_epoch;
         self.accepted_navigation_epochs = AcceptedNavigationEpochs::default();
@@ -29271,13 +29676,11 @@ fn metadata_headers(value: Option<&Value>) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
-            (
-                name.clone(),
-                value
-                    .as_str()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| value.to_string()),
-            )
+            let text = value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            (name.clone(), truncate_retained_string(&text))
         })
         .collect()
 }
@@ -34426,24 +34829,66 @@ async fn evaluate_handle_locator_resolution(
 
 async fn evaluate_locator_for_page(
     page: Arc<PageInner>,
-    locator_json: String,
+    locator_json: &str,
     index: usize,
-    body: String,
+    body: &str,
     timeout: Duration,
+) -> RwResult<String> {
+    let mut pinned_resolution = None;
+    let mut cached_expression = None;
+    evaluate_locator_for_page_cached(
+        page,
+        locator_json,
+        index,
+        body,
+        timeout,
+        &mut pinned_resolution,
+        &mut cached_expression,
+    )
+    .await
+}
+
+async fn evaluate_locator_for_page_cached(
+    page: Arc<PageInner>,
+    locator_json: &str,
+    index: usize,
+    body: &str,
+    timeout: Duration,
+    pinned_resolution: &mut Option<LocatorSessionResolution>,
+    cached_expression: &mut Option<String>,
 ) -> RwResult<String> {
     let deadline = OperationDeadline::new(timeout);
     for attempt in 0..=1 {
-        let resolution =
-            resolve_locator_session(Arc::clone(&page), &locator_json, deadline).await?;
-        let expression = locator_script(&resolution.locator_json, index, &body);
-        match evaluate_locator_resolution(&page, &resolution, &expression, deadline, Duration::ZERO)
+        let resolution = match pinned_resolution.as_ref() {
+            Some(pinned) if locator_resolution_ownership_is_current(&page, pinned) => {
+                pinned.clone()
+            }
+            _ => {
+                pinned_resolution.take();
+                cached_expression.take();
+                let resolution =
+                    resolve_locator_session(Arc::clone(&page), locator_json, deadline).await?;
+                *pinned_resolution = Some(resolution.clone());
+                resolution
+            }
+        };
+        if cached_expression.is_none() {
+            *cached_expression = Some(locator_script(&resolution.locator_json, index, body));
+        }
+        let expression = cached_expression
+            .as_deref()
+            .expect("locator expression was just cached");
+        match evaluate_locator_resolution(&page, &resolution, expression, deadline, Duration::ZERO)
             .await
         {
             Err(error)
                 if attempt == 0
                     && (is_frame_ownership_changed(&error)
-                        || is_locator_wait_context_loss(&error)) =>
+                        || is_locator_wait_context_loss(&error)
+                        || is_transient_action_resolution_error(&error)) =>
             {
+                pinned_resolution.take();
+                cached_expression.take();
                 continue;
             }
             result => return result,
@@ -35328,11 +35773,11 @@ impl Drop for FillGuardDropCleanup {
 
 async fn evaluate_locator_fill_for_page(
     page: Arc<PageInner>,
-    locator_json: String,
+    locator_json: &str,
     index: usize,
-    body: String,
-    guard_key: String,
-    value: String,
+    body: &str,
+    guard_key: &str,
+    value: &str,
     timeout: Duration,
     pinned_resolution: &mut Option<LocatorSessionResolution>,
     current_attempt_evidence: &mut FillAttemptEvidence,
@@ -35347,7 +35792,7 @@ async fn evaluate_locator_fill_for_page(
     let mut resolution = if let Some(pinned) = pinned_resolution.as_ref() {
         pinned.clone()
     } else {
-        resolve_locator_fill_session(Arc::clone(&page), &locator_json, deadline).await?
+        resolve_locator_fill_session(Arc::clone(&page), locator_json, deadline).await?
     };
     *pinned_resolution = Some(resolution.clone());
     let outcome = async {
@@ -35358,7 +35803,7 @@ async fn evaluate_locator_fill_for_page(
             let observation = evaluate_locator_resolution(
                 &page,
                 &resolution,
-                &fill_guard_reentry_observation_expression(&guard_key)?,
+                &fill_guard_reentry_observation_expression(guard_key)?,
                 deadline,
                 Duration::ZERO,
             )
@@ -35378,7 +35823,7 @@ async fn evaluate_locator_fill_for_page(
                         *current_attempt_evidence = FillAttemptEvidence::Resolve;
                         resolution = resolve_locator_fill_session(
                             Arc::clone(&page),
-                            &locator_json,
+                            locator_json,
                             deadline,
                         )
                         .await?;
@@ -35389,7 +35834,7 @@ async fn evaluate_locator_fill_for_page(
                     pinned_resolution.take();
                     *current_attempt_evidence = FillAttemptEvidence::Resolve;
                     resolution =
-                        resolve_locator_fill_session(Arc::clone(&page), &locator_json, deadline)
+                        resolve_locator_fill_session(Arc::clone(&page), locator_json, deadline)
                             .await?;
                     *pinned_resolution = Some(resolution.clone());
                 }
@@ -38088,9 +38533,10 @@ async fn frame_viewport_offset_for_page(
         } else {
             json!({ "kind": "nth", "base": owner_spec, "index": owner_index })
         };
+        let scoped_owner_json = scoped_owner_spec.to_string();
         let json = evaluate_locator_for_page(
             Arc::clone(&page),
-            scoped_owner_spec.to_string(),
+            &scoped_owner_json,
             0,
             r#"
 if (!el) return null;
@@ -38099,8 +38545,7 @@ return {
   x: rect.x + (Number(el.clientLeft) || 0),
   y: rect.y + (Number(el.clientTop) || 0)
 };
-"#
-            .to_string(),
+"#,
             timeout,
         )
         .await?;
@@ -38124,16 +38569,20 @@ async fn page_click_actionable_wait_async(
     let body = native_action_body(LOCATOR_TARGET_STATE_TEMPLATE);
     let mut last_info = json!({ "count": 0 });
     let mut last_info_json = last_info.to_string();
+    let mut pinned_resolution = None;
+    let mut cached_expression = None;
     let actionable_info = loop {
         ensure_native_action_owner_available(&page, "click")?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let command_timeout = action_poll_timeout(timeout_ms, true, remaining);
-        let evaluation = evaluate_locator_for_page(
+        let evaluation = evaluate_locator_for_page_cached(
             Arc::clone(&page),
-            locator_json.clone(),
+            &locator_json,
             index,
-            body.clone(),
+            &body,
             command_timeout,
+            &mut pinned_resolution,
+            &mut cached_expression,
         )
         .await;
         let json = match evaluation {
@@ -38354,11 +38803,11 @@ async fn page_fill_actionable_with_script_async(
         // Sync #106 parity: a safe probe timeout is transient until the outer action deadline.
         let evaluation = evaluate_locator_fill_for_page(
             Arc::clone(&page),
-            locator_json.clone(),
+            &locator_json,
             index,
-            fill_script.body.clone(),
-            fill_script.guard_key.clone(),
-            value.clone(),
+            &fill_script.body,
+            &fill_script.guard_key,
+            &value,
             command_timeout,
             &mut pinned_resolution,
             &mut current_attempt_evidence,
@@ -38640,17 +39089,25 @@ async fn page_screenshot_async(
         }
     }
     let result = capture_result?;
-    let base64_data = result.get("data").and_then(Value::as_str).unwrap_or("");
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_data)
-        .map_err(|error| RwError::Message(error.to_string()))?;
+    let bytes = {
+        let base64_data = result.get("data").and_then(Value::as_str).unwrap_or("");
+        base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .map_err(|error| RwError::Message(error.to_string()))?
+    };
+    // Drop the CDP reply before returning so base64 JSON and decoded bytes do
+    // not stack. Write any path from the same Vec without cloning the frame.
+    drop(result);
     if let Some(path) = path {
-        let path_bytes = bytes.clone();
-        tokio::task::spawn_blocking(move || std::fs::write(path, path_bytes))
-            .await
-            .map_err(|error| RwError::Message(error.to_string()))??;
+        Ok(tokio::task::spawn_blocking(move || {
+            std::fs::write(path, &bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(|error| RwError::Message(error.to_string()))??)
+    } else {
+        Ok(bytes)
     }
-    Ok(bytes)
 }
 
 async fn page_close_cleanup(
@@ -39051,9 +39508,9 @@ impl PyPage {
             async move {
                 let json = evaluate_locator_for_page(
                     page,
-                    locator_json,
+                    &locator_json,
                     index,
-                    "return el ? (el.innerText || el.textContent || '') : null;".to_string(),
+                    "return el ? (el.innerText || el.textContent || '') : null;",
                     timeout,
                 )
                 .await?;
@@ -40978,11 +41435,11 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
                 let mut current_attempt_evidence = FillAttemptEvidence::Resolve;
                 evaluate_locator_fill_for_page(
                     page,
-                    locator_json,
+                    &locator_json,
                     index,
-                    fill_script.body,
-                    fill_script.guard_key,
-                    value,
+                    &fill_script.body,
+                    &fill_script.guard_key,
+                    &value,
                     timeout,
                     &mut pinned_resolution,
                     &mut current_attempt_evidence,
@@ -41059,7 +41516,7 @@ return win.__rustwrightCleanupDrag ? win.__rustwrightCleanupDrag() : false;
             } else {
                 let browser = Arc::clone(&page.browser);
                 browser.block_on(async move {
-                    evaluate_locator_for_page(page, locator_json, index, script.body, timeout).await
+                    evaluate_locator_for_page(page, &locator_json, index, &script.body, timeout).await
                 })
             }
         })
@@ -43695,7 +44152,7 @@ impl PyPage {
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let browser = Arc::clone(&page.browser);
         browser.block_on(async move {
-            evaluate_locator_for_page(page, locator_json, index, body, timeout).await
+            evaluate_locator_for_page(page, &locator_json, index, &body, timeout).await
         })
     }
 
@@ -45055,6 +45512,12 @@ impl RustwrightPage {
 
     pub fn url(&self) -> String {
         self.inner.cached_main_frame_url().unwrap_or_default()
+    }
+
+    /// Soft-trim retained CDP / network / console buffers toward idle watermarks
+    /// without closing the page. Intended for long-lived agent sessions.
+    pub fn trim_retained_memory(&self) {
+        self.inner.trim_retained_memory();
     }
 
     /// Set or clear this page's general default timeout in milliseconds.
@@ -46550,7 +47013,7 @@ return waitForScrollSettle();
         let timeout = BrowserInner::command_timeout(timeout_ms);
         let browser = Arc::clone(&page.browser);
         browser.block_on_raw(cancelable(cancel.cloned(), async move {
-            evaluate_locator_for_page(page, locator_json, index, body, timeout).await
+            evaluate_locator_for_page(page, &locator_json, index, &body, timeout).await
         }))
     }
 }
@@ -50720,7 +51183,7 @@ fn record_page_observation_event_with_ownership(
                     request_body: request
                         .get("postData")
                         .and_then(Value::as_str)
-                        .map(ToString::to_string),
+                        .map(truncate_retained_string),
                     response_headers: Vec::new(),
                     navigation_epoch: accepted_document_navigation_epoch
                         .unwrap_or_else(|| network.epoch_for_observation(event_sequence)),
@@ -56477,13 +56940,20 @@ fn console_arg_value(arg: &Value) -> Value {
         return Value::Null;
     }
     if let Some(value) = arg.get("value") {
-        return value.clone();
+        return match value {
+            Value::String(text) => Value::String(truncate_retained_string(text)),
+            other => {
+                let mut value = other.clone();
+                compact_retained_cdp_value(&mut value);
+                value
+            }
+        };
     }
     if let Some(value) = arg.get("unserializableValue").and_then(Value::as_str) {
-        return Value::String(value.to_string());
+        return Value::String(truncate_retained_string(value));
     }
     if let Some(value) = arg.get("description").and_then(Value::as_str) {
-        return Value::String(value.to_string());
+        return Value::String(truncate_retained_string(value));
     }
     Value::Null
 }
@@ -56508,9 +56978,9 @@ fn route_from_event(event: &Value) -> Option<Value> {
         "resource_type": params.get("resourceType").cloned().unwrap_or(Value::Null),
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
-        "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
-        "post_data": request.get("postData").cloned().unwrap_or(Value::Null),
-        "post_data_entries": request.get("postDataEntries").cloned().unwrap_or(Value::Null),
+        "headers": retained_headers(request.get("headers")),
+        "post_data": retained_json_string(request.get("postData")),
+        "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
     }))
 }
 
@@ -56533,9 +57003,9 @@ fn request_from_event(event: &Value, redirected_from: Option<Value>) -> Option<V
         "is_navigation_request": params.get("documentURL") == request.get("url"),
         "url": request.get("url").cloned().unwrap_or(Value::Null),
         "method": request.get("method").cloned().unwrap_or(Value::Null),
-        "headers": request.get("headers").cloned().unwrap_or_else(|| json!({})),
-        "post_data": request.get("postData").cloned().unwrap_or(Value::Null),
-        "post_data_entries": request.get("postDataEntries").cloned().unwrap_or(Value::Null),
+        "headers": retained_headers(request.get("headers")),
+        "post_data": retained_json_string(request.get("postData")),
+        "post_data_entries": retained_post_data_entries(request.get("postDataEntries")),
         "redirect_hop": redirect_hop,
         "timing": Value::Null,
     });

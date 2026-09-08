@@ -1474,6 +1474,12 @@ impl Page {
     pub fn close(&self, options: CloseOptions) -> Result<()> {
         self.inner.close(options.timeout, options.run_before_unload)
     }
+
+    /// Soft-trim retained CDP / network / console buffers toward idle watermarks
+    /// without closing the page.
+    pub fn trim_retained_memory(&self) {
+        self.inner.trim_retained_memory();
+    }
 }
 
 fn map_page_event(event: rustwright_core::RustwrightPageEvent) -> PageEvent {
