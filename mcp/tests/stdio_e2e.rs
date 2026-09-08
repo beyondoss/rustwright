@@ -1437,6 +1437,9 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
         tool("browser_select_option")["inputSchema"]["required"],
         json!(["target"])
     );
+    // Nested per-property unions are portable and stay; only a union at the
+    // root of the schema is rejected by strict providers, so the value-xor-
+    // values rule now lives in the description and in parse_op instead.
     for field in ["values", "value"] {
         assert_eq!(
             tool("browser_select_option")["inputSchema"]["properties"][field]["oneOf"],
@@ -1446,19 +1449,17 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
             ])
         );
     }
-    assert_eq!(
-        tool("browser_select_option")["inputSchema"]["oneOf"],
-        json!([
-            {
-                "required": ["values"],
-                "not": {"required": ["value"]}
-            },
-            {
-                "required": ["value"],
-                "not": {"required": ["values"]}
-            }
-        ])
-    );
+    for listed_tool in tools {
+        let name = listed_tool["name"].as_str().expect("tool name");
+        let schema = &listed_tool["inputSchema"];
+        assert_eq!(schema["type"], "object", "{name} root is not an object");
+        for keyword in ["oneOf", "anyOf", "allOf", "not"] {
+            assert!(
+                schema.get(keyword).is_none(),
+                "{name} declares {keyword} at the root of its schema"
+            );
+        }
+    }
     assert_eq!(
         tool("browser_scroll")["inputSchema"]["properties"]["direction"]["enum"],
         json!(["up", "down"])
