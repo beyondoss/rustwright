@@ -121,7 +121,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Set up Zig
-        if: ${{ matrix.zig }}
+        if: ${{ matrix.zig && !matrix.pgo }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.1
@@ -132,16 +132,16 @@ jobs:
         with:
           tool: cargo-zigbuild@0.23.0
 
-      - name: Configure Zig linker shim
-        if: ${{ matrix.zig }}
+      - name: Install musl-tools (MCP PGO)
+        if: ${{ matrix.pgo && contains(matrix.target, 'linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
-          target_env="$(printf '%s' "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')"
-          cc_env="$(printf '%s' "${{ matrix.target }}" | tr '-' '_')"
-          echo "CARGO_ZIG_TARGET=${{ matrix.zig_target }}" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${target_env}_LINKER=$GITHUB_WORKSPACE/tools/zig-cc" >> "$GITHUB_ENV"
-          echo "CC_${cc_env}=$GITHUB_WORKSPACE/tools/zig-cc" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # Plain musl CLI/MCP builds use cargo-zigbuild alone (no tools/zig-cc).
+      # Musl MCP PGO uses musl-gcc: Zig cannot link __llvm_profile_runtime.
 
       - name: Build ${{ matrix.crate }} (${{ matrix.target }})
         shell: bash
@@ -186,9 +186,14 @@ jobs:
 
           case "${{ matrix.target }}" in
             *-linux-musl)
-              if command -v ldd >/dev/null 2>&1 && ldd "dist/${asset}" >/dev/null 2>&1; then
-                echo "::error::expected a static musl binary, but ldd resolved dynamic deps:"
+              if ldd "dist/${asset}" 2>/dev/null | grep -qE '\.so'; then
+                echo "::error::expected a static musl binary, but ldd resolved shared libs:"
                 ldd "dist/${asset}" || true
+                exit 1
+              fi
+              if ! file "dist/${asset}" | grep -qiE 'static'; then
+                echo "::error::expected file(1) to report a static binary:"
+                file "dist/${asset}" || true
                 exit 1
               fi
               ;;

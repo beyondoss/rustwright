@@ -79,9 +79,10 @@ tag (`v0.1.0`). Uploads use `--clobber`, so re-runs replace prior assets.
 `cli/` and `mcp/` version independently from the shared library version when
 needed.
 
-Linux assets are **static musl** binaries (Zig-linked). Darwin assets use the
-normal Apple dynamic link. Native-host MCP builds (Darwin arm64, Linux musl on
-matching arch runners including `ubuntu-24.04-arm`) go through
-`tools/build_mcp_pgo.sh`. Cross MCP targets without a runnable train stay on
-the plain release profile — today that is only `x86_64-apple-darwin` when
-built on arm64 macOS. See `MEMORY_BENCH.md` for measured PGO deltas.
+Linux assets are **static musl** binaries. Plain musl builds (CLI, and any
+non-PGO musl MCP) use `cargo zigbuild`. Native-runnable MCP builds go through
+`tools/build_mcp_pgo.sh`: Darwin arm64 uses the Apple toolchain; Linux musl
+PGO uses `musl-gcc` from `musl-tools` (Zig cannot link LLVM profile runtime).
+Cross MCP without a runnable train stays on the plain release profile — today
+that is only `x86_64-apple-darwin` when built on arm64 macOS. See
+`MEMORY_BENCH.md` for measured PGO deltas.

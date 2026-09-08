@@ -9,8 +9,10 @@
 #                             release assets; other cross targets are rejected.
 #   PGO_PROFILE_DIR           profile scratch dir
 #
-# For musl targets, configure a musl-capable linker first (release CI sets the
-# Zig shim via CARGO_TARGET_*_LINKER / CC_*).
+# Linux musl PGO uses the host musl-gcc (x86_64-linux-musl-gcc /
+# aarch64-linux-musl-gcc). Do not use cargo-zigbuild for instrumented musl
+# links — Zig rejects __llvm_profile_runtime. Plain (non-PGO) musl release
+# builds still use cargo-zigbuild in CI.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,6 +57,27 @@ if [[ ! -x "$profdata_bin" && ! -f "$profdata_bin" ]]; then
   echo "install with: rustup component add llvm-tools-preview --toolchain ${toolchain}" >&2
   exit 127
 fi
+
+case "$target" in
+  x86_64-unknown-linux-musl)
+    musl_cc="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER:-x86_64-linux-musl-gcc}"
+    if ! command -v "$musl_cc" >/dev/null 2>&1; then
+      echo "musl PGO requires ${musl_cc} (install musl-tools)" >&2
+      exit 127
+    fi
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$musl_cc"
+    export CC_x86_64_unknown_linux_musl="${CC_x86_64_unknown_linux_musl:-$musl_cc}"
+    ;;
+  aarch64-unknown-linux-musl)
+    musl_cc="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-aarch64-linux-musl-gcc}"
+    if ! command -v "$musl_cc" >/dev/null 2>&1; then
+      echo "musl PGO requires ${musl_cc} (install musl-tools)" >&2
+      exit 127
+    fi
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$musl_cc"
+    export CC_aarch64_unknown_linux_musl="${CC_aarch64_unknown_linux_musl:-$musl_cc}"
+    ;;
+esac
 
 mkdir -p "$profdir"
 find "$profdir" -mindepth 1 -delete
