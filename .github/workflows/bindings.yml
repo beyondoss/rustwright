@@ -27,7 +27,7 @@ jobs:
       - name: Build librustwright_capi (release)
         run: cargo build -p rustwright-capi --release --locked
       - name: Upload native library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: librustwright_capi-linux
           path: target/release/librustwright_capi.so
@@ -62,7 +62,7 @@ jobs:
 
       - name: Download native library
         if: steps.has.outputs.ok == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: librustwright_capi-linux
           path: target/release
@@ -144,13 +144,26 @@ jobs:
           assert not bad, f"{d['lang']}: failing cases {bad}"
           print(f"{d['lang']}: {len(d['results'])} cases OK")
           PY
+      # Upload can hit intermittent FinalizeArtifact 403s from the Actions
+      # intermediary; retry a few times before failing the job. The runner
+      # assertions above already validated the binding itself.
       - name: Upload results
         if: steps.has.outputs.ok == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload-results
+        continue-on-error: true
         with:
           name: results-${{ matrix.lang }}
           path: ${{ env.RW_OUT }}
           if-no-files-found: error
+      - name: Upload results (retry)
+        if: steps.has.outputs.ok == 'true' && steps.upload-results.outcome != 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: results-${{ matrix.lang }}
+          path: ${{ env.RW_OUT }}
+          if-no-files-found: error
+          overwrite: true
 
   equivalence:
     name: Cross-language equivalence
@@ -159,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Download all language results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: results-*
           path: results
