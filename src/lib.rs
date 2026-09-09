@@ -13148,7 +13148,9 @@ return this.dataset.mainWorldOverride === "observed";
             state.mark_frame_cache_dirty("page-session");
             (pin, state.subscribe_session_updates())
         };
-        let stale_setup = tokio::spawn(async {
+        let (stale_setup_drop_tx, stale_setup_drop_rx) = oneshot::channel::<()>();
+        let stale_setup = tokio::spawn(async move {
+            let _stale_setup_drop_tx = stale_setup_drop_tx;
             std::future::pending::<()>().await;
         });
         harness
@@ -13161,7 +13163,7 @@ return this.dataset.mainWorldOverride === "observed";
                 stale_pin.generation,
                 IframeSetupTaskEntry {
                     token: u64::MAX,
-                    handle: Some(stale_setup.abort_handle()),
+                    handle: Some(stale_setup),
                 },
             );
 
@@ -13206,10 +13208,10 @@ return this.dataset.mainWorldOverride === "observed";
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&stale_pin.generation));
-        assert!(stale_setup
-            .await
-            .expect_err("removed setup generation must be aborted")
-            .is_cancelled());
+        assert!(
+            stale_setup_drop_rx.await.is_err(),
+            "removed setup generation must be aborted"
+        );
         tokio::time::timeout(Duration::from_millis(100), waiter_updates.changed())
             .await
             .expect("authoritative ownership change must notify pinned waiters")
@@ -28990,7 +28992,7 @@ const OOPIF_OVERFLOW_RECONCILIATION_ERROR_PREFIX: &str =
 
 struct IframeSetupTaskEntry {
     token: u64,
-    handle: Option<tokio::task::AbortHandle>,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct IframeSetupTaskRegistry {
@@ -29033,13 +29035,20 @@ impl IframeSetupTaskRegistry {
         }
     }
 
-    fn abort_all(&self) {
+    fn take_aborted(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = self.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (_, entry) in handles.drain() {
-            if let Some(handle) = entry.handle {
+        handles
+            .drain()
+            .filter_map(|(_, entry)| {
+                let handle = entry.handle?;
                 handle.abort();
-            }
-        }
+                Some(handle)
+            })
+            .collect()
+    }
+
+    fn abort_all(&self) {
+        drop(self.take_aborted());
     }
 }
 
@@ -29252,6 +29261,12 @@ impl PageInner {
 
     fn abort_iframe_setup_tasks(&self) {
         self.iframe_setup_tasks.abort_all();
+    }
+
+    async fn abort_iframe_setup_tasks_and_wait(&self) {
+        for handle in self.iframe_setup_tasks.take_aborted() {
+            let _ = handle.await;
+        }
     }
     fn clear_worker_resume_handoffs(&self) {
         let retention_gate = self.browser.client.retention_gate();
@@ -39716,9 +39731,9 @@ async fn page_close_async(
 ) -> RwResult<()> {
     let lifecycle = Arc::clone(&page.lifecycle);
     single_flight_close(lifecycle, false, move || async move {
+        page.abort_iframe_setup_tasks_and_wait().await;
         finalize_page_video(&page, true).await;
         page.clear_worker_resume_handoffs();
-        page.abort_iframe_setup_tasks();
         page_close_cleanup(page, timeout, run_before_unload).await
     })
     .await
@@ -50439,7 +50454,7 @@ fn spawn_attached_iframe_session_initialization(
     handles
         .get_mut(&generation)
         .expect("reserved iframe setup generation")
-        .handle = Some(handle.abort_handle());
+        .handle = Some(handle);
 }
 
 async fn setup_attached_iframe_session(
