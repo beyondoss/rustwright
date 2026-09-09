@@ -21,7 +21,7 @@ use rustwright::{
     ConsoleRecords, Dialog, DialogKind, Error, EventReceiver, FailureMetadata, FileChooser,
     GotoOptions, LaunchOptions, NavigationDetail, NavigationDetailReceiver, NavigationObservation,
     NetworkBody, NetworkRecord, NetworkRecords, Page, PageEvent, ScreenshotOptions,
-    TargetLifecycleEvent, TargetLifecycleReceiver, chromium,
+    TargetLifecycleEvent, TargetLifecycleReceiver, VideoOptions, VideoRecording, chromium,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -676,6 +676,10 @@ pub enum BrowserOp {
         full_page: bool,
         image_type: ScreenshotType,
     },
+    StartVideo {
+        path: String,
+    },
+    StopVideo,
     Close,
 }
 
@@ -696,6 +700,8 @@ impl BrowserOp {
                 filename: Some(_),
                 ..
             } | Self::TakeScreenshot { .. }
+                | Self::StartVideo { .. }
+                | Self::StopVideo
         )
     }
 }
@@ -1366,6 +1372,7 @@ struct BrowserState {
     /// Target id whose main world currently holds the installed snapshot helper.
     /// Cleared on navigation / page swap so the next snapshot reinstalls.
     snapshot_helper_target: Option<String>,
+    video_page: Option<Page>,
     page_record_source: Option<Box<dyn PageRecordSource>>,
     lifecycle_subscription_provider: LifecycleSubscriptionProvider,
     browser_query_provider: Box<dyn BrowserQueryProvider>,
@@ -1587,6 +1594,7 @@ impl Default for BrowserState {
             inventory_stale: false,
             snapshot_evaluator: None,
             snapshot_helper_target: None,
+            video_page: None,
             page_record_source: None,
             lifecycle_subscription_provider: Box::new(|browser| {
                 browser.map(|browser| {
@@ -5468,6 +5476,57 @@ impl BrowserState {
         })
     }
 
+    fn start_video(
+        &mut self,
+        path: &str,
+        request: &ActorRequest,
+    ) -> Result<BrowserOutput, BrowserError> {
+        if self
+            .video_page
+            .as_ref()
+            .is_some_and(Page::is_recording_video)
+        {
+            return Err(BrowserError::Message(
+                "video recording is already in progress".to_owned(),
+            ));
+        }
+        let page = self.ensure_live_page(request)?.clone();
+        page.start_video_with_cancel(
+            path,
+            VideoOptions::default(),
+            Some(&request.cancellation.engine),
+        )
+        .map_err(|error| {
+            self.operation_error(
+                "start video failed",
+                error,
+                &request.cancellation,
+                request.timeout_ms,
+            )
+        })?;
+        self.video_page = Some(page);
+        Ok(BrowserOutput::Text(format!(
+            "Video recording started. Output will be `{path}`."
+        )))
+    }
+
+    fn stop_video(&mut self, request: &ActorRequest) -> Result<BrowserOutput, BrowserError> {
+        let page = self.video_page.take().ok_or_else(|| {
+            BrowserError::Message("no video recording is in progress".to_owned())
+        })?;
+        let recording = page
+            .stop_video_with_cancel(Some(&request.cancellation.engine))
+            .map_err(|error| {
+                self.operation_error(
+                    "stop video failed",
+                    error,
+                    &request.cancellation,
+                    request.timeout_ms,
+                )
+            })?;
+        Ok(BrowserOutput::Text(format_video_recording(&recording)))
+    }
+
     fn run(&mut self, request: &ActorRequest) -> BrowserResult {
         self.response_shape = None;
         if !matches!(
@@ -5662,6 +5721,8 @@ impl BrowserState {
                 full_page,
                 image_type,
             } => self.take_screenshot(*full_page, *image_type, request),
+            BrowserOp::StartVideo { path } => self.start_video(path, request),
+            BrowserOp::StopVideo => self.stop_video(request),
             BrowserOp::Close => {
                 let had_browser = self.browser.is_some();
                 self.close();
@@ -5702,6 +5763,9 @@ impl BrowserState {
     }
 
     fn close(&mut self) {
+        if let Some(page) = self.video_page.take() {
+            let _ = page.stop_video();
+        }
         self.current_refs.clear();
         self.snapshot_helper_target = None;
         self.pages.clear();
@@ -5826,8 +5890,21 @@ fn browser_op_name(op: &BrowserOp) -> &'static str {
         BrowserOp::PageInfo => "page_info",
         BrowserOp::Status => "status",
         BrowserOp::TakeScreenshot { .. } => "browser_take_screenshot",
+        BrowserOp::StartVideo { .. } | BrowserOp::StopVideo => "browser_record_video",
         BrowserOp::Close => "browser_close",
     }
+}
+
+fn format_video_recording(recording: &VideoRecording) -> String {
+    format!(
+        "Video saved to `{}` ({} frames, {} ms, {}x{}, {} bytes).",
+        recording.path,
+        recording.frames,
+        recording.duration_ms,
+        recording.width,
+        recording.height,
+        recording.bytes
+    )
 }
 fn refs_in_snapshot_line(line: &str) -> Vec<String> {
     if line.trim_start().starts_with("- text:") {
@@ -8425,6 +8502,13 @@ mod tests {
             }
             .bypass_response_shaping()
         );
+        assert!(
+            BrowserOp::StartVideo {
+                path: "clip.avi".to_owned(),
+            }
+            .bypass_response_shaping()
+        );
+        assert!(BrowserOp::StopVideo.bypass_response_shaping());
         assert!(
             !BrowserOp::NetworkRequests {
                 include_static: true,

@@ -55,8 +55,8 @@ other MCP client:
 
 Drop the `env` block if you installed the managed Chromium instead.
 
-To verify: ask the client to list tools (the 22 below should appear in the
-default `mirror` profile), then
+To verify: ask the client to list tools (the default `mirror` profile
+exposes 28 native tools), then
 try `browser_navigate` to `https://example.com` — the tool result is an
 accessibility snapshot of the page.
 
@@ -85,6 +85,7 @@ accessibility snapshot of the page.
 | `browser_get_text` | Return rendered text for a unique CSS selector. |
 | `browser_evaluate` | Evaluate a JavaScript function in the page or element-ref context. |
 | `browser_take_screenshot` | Capture the page as inline PNG or JPEG image content. |
+| `browser_record_video` | Start or stop an MJPEG AVI recording of the page; the file path is returned on stop. |
 | `browser_close` | Close the browser; the next browser operation starts a fresh session. |
 
 Refs are session-scoped and never reused, so a stale ref can never silently
@@ -94,9 +95,10 @@ pending dialog details and defer further page work until
 `browser_handle_dialog` resolves it.
 
 Set `RUSTWRIGHT_MCP_TOOLSET=lean` to expose the smaller interaction-oriented
-profile. The default `mirror` profile exposes all 27 native tools.
+profile. The default `mirror` profile exposes all 28 native tools.
 `browser_evaluate` can be removed from either profile by setting
-`RUSTWRIGHT_MCP_ALLOW_EVAL=false`.
+`RUSTWRIGHT_MCP_ALLOW_EVAL=false`. Video files are written to the same private
+temp directory as oversized screenshots and last until the server shuts down.
 
 ## Configuration
 

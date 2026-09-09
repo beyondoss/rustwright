@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 pub use rustwright_core::{
     ActionFailureError, ActionTimeoutError, ActionabilityError, CancelToken, CommandWritten,
     FailureKind, FailureMetadata, FailurePhase, FailureTargetKind, RwError as Error,
+    VideoRecording,
 };
 
 /// Result type returned by the native API.
@@ -395,6 +396,34 @@ impl ScreenshotOptions {
     /// Capture the entire scrollable page.
     pub fn full_page(mut self, full_page: bool) -> Self {
         self.full_page = Some(full_page);
+        self
+    }
+}
+
+/// Options for [`Page::start_video`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VideoOptions {
+    pub quality: Option<u32>,
+    pub max_width: Option<u32>,
+    pub every_nth_frame: Option<u32>,
+}
+
+impl VideoOptions {
+    /// JPEG quality in 1..=100. Defaults to 80.
+    pub fn quality(mut self, quality: u32) -> Self {
+        self.quality = Some(quality);
+        self
+    }
+
+    /// Longest captured edge in CSS pixels. Defaults to 1280.
+    pub fn max_width(mut self, max_width: u32) -> Self {
+        self.max_width = Some(max_width);
+        self
+    }
+
+    /// Keep one CDP screencast frame out of every N. Defaults to 1.
+    pub fn every_nth_frame(mut self, every_nth_frame: u32) -> Self {
+        self.every_nth_frame = Some(every_nth_frame);
         self
     }
 }
@@ -1470,6 +1499,42 @@ impl Page {
         )
     }
 
+    /// Start recording the page to an MJPEG AVI at `path`.
+    pub fn start_video(&self, path: impl Into<String>, options: VideoOptions) -> Result<()> {
+        self.start_video_with_cancel(path, options, None)
+    }
+
+    /// Start recording with an optional cancellation signal.
+    pub fn start_video_with_cancel(
+        &self,
+        path: impl Into<String>,
+        options: VideoOptions,
+        cancel: Option<&CancelToken>,
+    ) -> Result<()> {
+        self.inner.start_video_with_cancel(
+            &path.into(),
+            options.quality,
+            options.max_width,
+            options.every_nth_frame,
+            cancel,
+        )
+    }
+
+    /// Stop the active recording and write the AVI.
+    pub fn stop_video(&self) -> Result<VideoRecording> {
+        self.stop_video_with_cancel(None)
+    }
+
+    /// Stop the active recording with an optional cancellation signal.
+    pub fn stop_video_with_cancel(&self, cancel: Option<&CancelToken>) -> Result<VideoRecording> {
+        self.inner.stop_video_with_cancel(cancel)
+    }
+
+    /// Return whether this page is currently recording video.
+    pub fn is_recording_video(&self) -> bool {
+        self.inner.is_recording_video()
+    }
+
     /// Close this page.
     pub fn close(&self, options: CloseOptions) -> Result<()> {
         self.inner.close(options.timeout, options.run_before_unload)
@@ -1979,5 +2044,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded, json!({"self": {"__rustwright_cdp_cycle__": true}}));
+    }
+
+    #[test]
+    fn start_and_stop_video_writes_mjpeg_avi_from_screencast_frames() {
+        use std::sync::mpsc;
+        use std::{fs, thread};
+
+        let output = std::env::temp_dir().join(format!(
+            "rustwright-video-harness-{}-{}.avi",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let output_for_page = output.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let mut harness = rustwright_core::RustwrightNavigationHarness::new(64);
+        let page = Page {
+            inner: harness.page(),
+        };
+        let responder = thread::spawn(move || {
+            harness.reply_next("Page.startScreencast", json!({}));
+            let frame = json!({
+                "sessionId": "page-session",
+                "method": "Page.screencastFrame",
+                "params": {
+                    "data": "/9j/wAALCAAwAEABEQD/2Q==",
+                    "metadata": {"timestamp": 1.0},
+                    "sessionId": 7
+                }
+            });
+            harness.emit(frame.clone());
+            let mut next = frame;
+            next["params"]["metadata"]["timestamp"] = json!(1.1);
+            next["params"]["sessionId"] = json!(8);
+            harness.emit(next);
+            for _ in 0..2 {
+                let command = harness.next_command("Page.screencastFrameAck");
+                harness.reply(&command, json!({}));
+            }
+            started_tx.send(()).expect("started");
+            stop_rx.recv().expect("stop requested");
+            harness.reply_next("Page.stopScreencast", json!({}));
+        });
+
+        page.start_video(
+            output_for_page.to_string_lossy().as_ref(),
+            VideoOptions::default(),
+        )
+        .expect("start video");
+        assert!(page.is_recording_video());
+        started_rx.recv().expect("frames acked");
+        stop_tx.send(()).expect("request stop");
+        let recording = page.stop_video().expect("stop video");
+        responder.join().expect("harness");
+        assert!(!page.is_recording_video());
+        assert_eq!(recording.frames, 2);
+        assert_eq!(recording.width, 64);
+        assert_eq!(recording.height, 48);
+        assert!(output.is_file());
+        let bytes = fs::read(&output).expect("read avi");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"AVI ");
+        let _ = fs::remove_file(output);
     }
 }

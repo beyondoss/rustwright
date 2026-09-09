@@ -64,6 +64,13 @@ enum Commands {
         #[arg(long)]
         full_page: bool,
     },
+    /// Start recording the page to an MJPEG AVI.
+    RecordStart {
+        #[arg(default_value = "recording.avi")]
+        path: PathBuf,
+    },
+    /// Stop recording and write the AVI.
+    RecordStop,
     /// Wait before the next command.
     Wait {
         #[arg(default_value_t = 1_000)]
@@ -202,6 +209,18 @@ fn command_action(command: Commands) -> Result<(BrowserAction, LaunchConfig)> {
             .to_string(),
             full_page,
         },
+        Commands::RecordStart { path } => BrowserAction::RecordStart {
+            path: if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .context("failed to resolve video path")?
+                    .join(path)
+            }
+            .to_string_lossy()
+            .to_string(),
+        },
+        Commands::RecordStop => BrowserAction::RecordStop,
         Commands::Wait { milliseconds } => {
             if milliseconds > 120_000 {
                 bail!("milliseconds must not exceed 120000");
