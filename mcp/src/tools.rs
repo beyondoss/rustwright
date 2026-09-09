@@ -591,9 +591,11 @@ pub(crate) fn parse_op(
     arguments: Option<Map<String, Value>>,
 ) -> Result<BrowserOp, String> {
     // Hosts sometimes forward internal metadata inside tool arguments
-    // (Cursor: `_model_supports_vision`). Those keys are not part of the
-    // published tool surface; strip underscore-prefixed roots so strict
-    // `deny_unknown_fields` decode still accepts the real parameters.
+    // (Cursor: `_model_supports_vision`). That key is advertised on every
+    // published schema so hosts that validate `additionalProperties: false`
+    // before send do not reject the call. Underscore-prefixed roots are
+    // still stripped here so `deny_unknown_fields` decode accepts the real
+    // parameters, including future host bookkeeping not yet in the schema.
     // Unknown non-underscore fields stay rejected — that feedback is for
     // model mistakes (`uri` vs `url`), not host bookkeeping.
     let mut arguments = arguments.unwrap_or_default();
@@ -1013,7 +1015,7 @@ fn schema(kind: ToolKind) -> JsonObject {
             "description": "Ref from the latest snapshot, such as e3"
         })
     };
-    let value = match kind {
+    let mut value = match kind {
         ToolKind::Navigate => json!({
             "type": "object",
             "properties": {"url": {"type": "string", "description": "URL to navigate to"}},
@@ -1274,10 +1276,26 @@ fn schema(kind: ToolKind) -> JsonObject {
             "additionalProperties": false
         }),
     };
+    advertise_cursor_host_metadata(&mut value);
     value
         .as_object()
         .cloned()
         .unwrap_or_default()
+}
+
+// Cursor injects `_model_supports_vision` into every MCP tool call and then
+// validates arguments against the published schema. Without this property,
+// `additionalProperties: false` rejects the call before `parse_op` can strip
+// the key. Keep the schema a boolean (the host sends true/false) and omit a
+// description so models are not invited to set it.
+fn advertise_cursor_host_metadata(schema: &mut Value) {
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return;
+    };
+    properties.insert(
+        "_model_supports_vision".to_owned(),
+        json!({"type": "boolean"}),
+    );
 }
 
 #[cfg(test)]
@@ -1402,8 +1420,12 @@ mod tests {
     }
 
     #[test]
-    fn serialized_catalog_fits_default_nine_kib_budget_at_id_boundary() {
-        const CATALOG_MAX_BYTES: usize = 9 * 1024;
+    fn serialized_catalog_fits_tools_list_budget_at_id_boundary() {
+        // tools/list is not shaped by the 9 KiB tool-call budget. Advertising
+        // Cursor's `_model_supports_vision` flag on every schema pushes the
+        // catalog past that envelope; keep a hard cap so the handshake stays
+        // compact, with 64 bytes of slack under the wire limit.
+        const CATALOG_MAX_BYTES: usize = 11 * 1024;
         let id = RequestId::String("i".repeat(254).into());
         assert_eq!(serde_json::to_vec(&id).unwrap().len(), 256);
         let response = ServerJsonRpcMessage::response(ServerResult::ListToolsResult(catalog()), id);
@@ -1449,7 +1471,15 @@ mod tests {
             tools
                 .iter()
                 .all(|tool| tool.input_schema["type"] == "object"
-                    && tool.input_schema["additionalProperties"] == false)
+                    && tool.input_schema["additionalProperties"] == false
+                    && tool.input_schema["properties"]["_model_supports_vision"]
+                        == json!({"type": "boolean"})
+                    && tool.input_schema
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .is_none_or(|required| {
+                            !required.iter().any(|value| value == "_model_supports_vision")
+                        }))
         );
     }
 
@@ -1579,7 +1609,8 @@ mod tests {
                 "startTarget": {"type": "string"},
                 "endTarget": {"type": "string"},
                 "startElement": {"type": ["string", "null"]},
-                "endElement": {"type": ["string", "null"]}
+                "endElement": {"type": ["string", "null"]},
+                "_model_supports_vision": {"type": "boolean"}
             },
             "required": ["startTarget", "endTarget"],
             "additionalProperties": false
@@ -1656,16 +1687,22 @@ mod tests {
 
     #[test]
     fn host_internal_underscore_arguments_are_ignored() {
-        // Cursor (and similar hosts) inject bookkeeping such as
-        // `_model_supports_vision` into MCP tool arguments. The published
-        // schemas stay `additionalProperties: false` and decode stays
-        // `deny_unknown_fields`; only underscore-prefixed roots are dropped
-        // so a valid call is not rejected before the browser opens.
+        // Cursor injects `_model_supports_vision` and validates the payload
+        // against the published schema before the request is sent. The
+        // schemas therefore advertise that optional boolean while staying
+        // `additionalProperties: false`. Decode stays `deny_unknown_fields`;
+        // underscore-prefixed roots are dropped so a valid call is not
+        // rejected before the browser opens.
         let navigate = TOOL_SPECS
             .iter()
             .copied()
             .find(|spec| spec.name == "browser_navigate")
             .unwrap();
+        assert_eq!(
+            descriptor(navigate).input_schema["properties"]["_model_supports_vision"],
+            json!({"type": "boolean"}),
+            "hosts that validate the published schema must see the Cursor flag"
+        );
         assert!(
             matches!(
                 parse_op(
