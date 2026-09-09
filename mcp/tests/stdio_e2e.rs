@@ -1409,11 +1409,11 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
     );
     assert_eq!(
         tool("browser_navigate_back")["inputSchema"]["properties"],
-        json!({})
+        json!({"_model_supports_vision": {"type": "boolean"}})
     );
     assert_eq!(
         tool("browser_navigate_forward")["inputSchema"]["properties"],
-        json!({})
+        json!({"_model_supports_vision": {"type": "boolean"}})
     );
     assert_eq!(
         tool("browser_click")["inputSchema"]["properties"]["target"]["pattern"],
@@ -1513,7 +1513,10 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
 
     server.send(json!({
         "jsonrpc":"2.0","id":3,"method":"tools/call",
-        "params":{"name":"browser_navigate","arguments":{"url":page_server.url()}}
+        "params":{"name":"browser_navigate","arguments":{
+            "url":page_server.url(),
+            "_model_supports_vision":true
+        }}
     }));
     thread::sleep(Duration::from_millis(40));
     server.send(json!({
@@ -1669,8 +1672,8 @@ fn real_stdio_uses_one_description_profile_for_every_client() {
     assert_eq!(unknown, archived);
     for frame_bytes in [codex_frame_bytes, unknown_frame_bytes] {
         assert!(
-            frame_bytes <= 9 * 1024,
-            "tools/list response is {frame_bytes} bytes, over 9216"
+            frame_bytes <= 11 * 1024,
+            "tools/list response is {frame_bytes} bytes, over 11264"
         );
     }
 }
