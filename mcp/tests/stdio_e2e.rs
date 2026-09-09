@@ -1357,7 +1357,7 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
     server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
     let listed = server.receive();
     let tools = listed["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 27);
+    assert_eq!(tools.len(), 28);
     assert_eq!(
         tools
             .iter()
@@ -1390,6 +1390,7 @@ fn real_stdio_snapshot_click_monotonic_refs_and_clean_shutdown() {
             "browser_get_text",
             "browser_evaluate",
             "browser_take_screenshot",
+            "browser_record_video",
             "browser_close",
         ]
     );

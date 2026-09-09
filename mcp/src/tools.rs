@@ -35,6 +35,7 @@ pub(crate) enum ToolKind {
     GetText,
     Evaluate,
     TakeScreenshot,
+    RecordVideo,
     Close,
 }
 
@@ -177,6 +178,11 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
         description: "Capture image; fallback lasts until shutdown.",
     },
     ToolSpec {
+        kind: ToolKind::RecordVideo,
+        name: "browser_record_video",
+        description: "Start/stop MJPEG AVI recording.",
+    },
+    ToolSpec {
         kind: ToolKind::Close,
         name: "browser_close",
         description: "Close browser; next tool starts fresh.",
@@ -200,6 +206,7 @@ const LEAN_TOOLS: &[&str] = &[
     "browser_tabs",
     "browser_evaluate",
     "browser_take_screenshot",
+    "browser_record_video",
     "browser_close",
 ];
 
@@ -494,6 +501,19 @@ struct EvaluateArgs {
 enum RawScreenshotType {
     Png,
     Jpeg,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RawVideoAction {
+    Start,
+    Stop,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordVideoArgs {
+    action: RawVideoAction,
 }
 
 #[derive(Deserialize)]
@@ -929,6 +949,15 @@ pub(crate) fn parse_op(
                 },
             })
         }
+        ToolKind::RecordVideo => {
+            let args: RecordVideoArgs = decode(arguments)?;
+            match args.action {
+                RawVideoAction::Start => Ok(BrowserOp::StartVideo {
+                    path: String::new(),
+                }),
+                RawVideoAction::Stop => Ok(BrowserOp::StopVideo),
+            }
+        }
         ToolKind::Close => {
             let _: EmptyArgs = decode(arguments)?;
             Ok(BrowserOp::Close)
@@ -1275,6 +1304,14 @@ fn schema(kind: ToolKind) -> JsonObject {
             },
             "additionalProperties": false
         }),
+        ToolKind::RecordVideo => json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "stop"]}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
     };
     advertise_cursor_host_metadata(&mut value);
     value.as_object().cloned().unwrap_or_default()
@@ -1393,24 +1430,27 @@ mod tests {
             })
             .map(|spec| (spec.name, spec.description))
             .collect();
-        assert_eq!(steering_descriptions, [
-            (
-                "browser_snapshot",
-                "Snapshot page. Narrow with target/depth. Refs are session-only and never reused."
-            ),
-            (
-                "browser_console_messages",
-                "List bounded console records; filter by level."
-            ),
-            (
-                "browser_network_requests",
-                "List/filter bounded requests; use browser_network_request for one."
-            ),
-            (
-                "browser_get_text",
-                "Extract text. Use browser_wait_for to validate."
-            ),
-        ]);
+        assert_eq!(
+            steering_descriptions,
+            [
+                (
+                    "browser_snapshot",
+                    "Snapshot page. Narrow with target/depth. Refs are session-only and never reused."
+                ),
+                (
+                    "browser_console_messages",
+                    "List bounded console records; filter by level."
+                ),
+                (
+                    "browser_network_requests",
+                    "List/filter bounded requests; use browser_network_request for one."
+                ),
+                (
+                    "browser_get_text",
+                    "Extract text. Use browser_wait_for to validate."
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1460,7 +1500,7 @@ mod tests {
     #[test]
     fn all_descriptors_are_strict_objects() {
         let tools: Vec<Tool> = TOOL_SPECS.iter().copied().map(descriptor).collect();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         assert!(tools.iter().all(|tool| {
             tool.input_schema["type"] == "object"
                 && tool.input_schema["additionalProperties"] == false
@@ -1490,7 +1530,7 @@ mod tests {
         const FORBIDDEN_ROOT_KEYWORDS: [&str; 4] = ["oneOf", "anyOf", "allOf", "not"];
         assert_eq!(
             TOOL_SPECS.len(),
-            27,
+            28,
             "every ToolKind must appear in TOOL_SPECS"
         );
         for spec in TOOL_SPECS {
@@ -1588,6 +1628,11 @@ mod tests {
         accepts("browser_wait_for", json!({"textGone": "Loading"}));
         rejects("browser_wait_for", json!({}));
         rejects("browser_wait_for", json!({"timeout_ms": 500}));
+
+        accepts("browser_record_video", json!({"action": "start"}));
+        accepts("browser_record_video", json!({"action": "stop"}));
+        rejects("browser_record_video", json!({}));
+        rejects("browser_record_video", json!({"action": "pause"}));
     }
 
     #[test]
@@ -1806,11 +1851,14 @@ mod tests {
                 for key in required {
                     let key = key.as_str().expect("required key");
                     let declared = &schema["properties"][key];
-                    accepted.insert(key.to_owned(), match declared.get("type") {
-                        Some(Value::String(ty)) if ty == "number" => json!(1),
-                        Some(Value::String(ty)) if ty == "boolean" => json!(true),
-                        _ => json!("https://example.com"),
-                    });
+                    accepted.insert(
+                        key.to_owned(),
+                        match declared.get("type") {
+                            Some(Value::String(ty)) if ty == "number" => json!(1),
+                            Some(Value::String(ty)) if ty == "boolean" => json!(true),
+                            _ => json!("https://example.com"),
+                        },
+                    );
                 }
             }
             let mut with_flag = accepted.clone();

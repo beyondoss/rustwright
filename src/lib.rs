@@ -44,6 +44,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream};
 
 mod startup_timing;
+mod video;
+
+pub use video::{VideoRecording, VideoStartOptions};
 
 pub type RwResult<T> = Result<T, RwError>;
 type CdpPendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<RwResult<Value>>>>>;
@@ -3525,6 +3528,7 @@ mod tests {
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
                 console_records: Mutex::new(ConsoleRecordStore::default()),
                 console_capture: ConsoleCaptureState::default(),
                 console_replay_until_event_cursor: Mutex::new(HashMap::new()),
@@ -5335,6 +5339,7 @@ multiline-compatible = """4.5.6"""
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
                 console_records: Mutex::new(ConsoleRecordStore::default()),
                 console_capture: ConsoleCaptureState::default(),
                 console_replay_until_event_cursor: Mutex::new(HashMap::new()),
@@ -5496,6 +5501,7 @@ multiline-compatible = """4.5.6"""
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
                 console_records: Mutex::new(ConsoleRecordStore::default()),
                 console_capture: ConsoleCaptureState::default(),
                 console_replay_until_event_cursor: Mutex::new(HashMap::new()),
@@ -6206,6 +6212,7 @@ multiline-compatible = """4.5.6"""
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
             }),
         };
         *page.inner.main_frame_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("main-frame".to_string());
@@ -9343,6 +9350,7 @@ multiline-compatible = """4.5.6"""
             target_closed: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
             close_target_on_drop: AtomicBool::new(false),
+            video: tokio::sync::Mutex::new(None),
         });
         let event = json!({
             "sessionId": "child-session",
@@ -10009,6 +10017,7 @@ multiline-compatible = """4.5.6"""
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
             })
         };
         let (generation, winner_lock) = match browser.attached_pages.reserve("same-target") {
@@ -11525,6 +11534,7 @@ multiline-compatible = """4.5.6"""
             target_closed: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
             close_target_on_drop: AtomicBool::new(false),
+            video: tokio::sync::Mutex::new(None),
         });
         NavigationTestHarness {
             page,
@@ -26128,6 +26138,13 @@ fn strip_retained_heavy_payloads(event: &mut Value) {
                 compact_retained_cdp_value(args);
             }
         }
+        "Page.screencastFrame" => {
+            if let Some(params) = event.pointer_mut("/params") {
+                if let Some(object) = params.as_object_mut() {
+                    object.remove("data");
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -26209,6 +26226,7 @@ fn retained_cdp_event_params(method: &str, params: &Value) -> Option<Value> {
             "stackTrace",
         ],
         "Runtime.exceptionThrown" => &["timestamp", "exceptionDetails"],
+        "Page.screencastFrame" => &["sessionId", "metadata"],
         _ => &[],
     };
     if let Some(object) = params.as_object() {
@@ -29051,6 +29069,13 @@ struct PageInner {
     target_closed: AtomicBool,
     crashed: AtomicBool,
     close_target_on_drop: AtomicBool,
+    video: tokio::sync::Mutex<Option<ActiveVideo>>,
+}
+
+struct ActiveVideo {
+    stop_tx: oneshot::Sender<()>,
+    join: tokio::task::JoinHandle<RwResult<video::FinishedJournal>>,
+    output_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -29278,6 +29303,11 @@ impl PageInner {
         }
         self.background_override_active
             .store(false, Ordering::SeqCst);
+        if let Ok(mut slot) = self.video.try_lock() {
+            if let Some(active) = slot.take() {
+                let _ = active.stop_tx.send(());
+            }
+        }
     }
 
     /// Soft-trim page-owned retained stores and the shared CDP event log back
@@ -29342,6 +29372,11 @@ impl PageInner {
 
 impl Drop for PageInner {
     fn drop(&mut self) {
+        if let Ok(mut slot) = self.video.try_lock() {
+            if let Some(active) = slot.take() {
+                let _ = active.stop_tx.send(());
+            }
+        }
         self.abort_iframe_setup_tasks();
         self.browser.attached_pages.remove_page(
             &self.target_id,
@@ -39458,6 +39493,186 @@ async fn page_screenshot_async(
     }
 }
 
+fn screencast_frame_session_id(params: &Value) -> Option<u64> {
+    let value = params.get("sessionId")?;
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+}
+
+async fn ingest_screencast_frame(
+    client: &Arc<CdpClient>,
+    session_id: &str,
+    event: &Value,
+    journal: &mut video::FrameJournal,
+    started: Instant,
+) {
+    if event.get("method").and_then(Value::as_str) != Some("Page.screencastFrame") {
+        return;
+    }
+    if event.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+        return;
+    }
+    let Some(params) = event.get("params") else {
+        return;
+    };
+    let Some(screencast_session) = screencast_frame_session_id(params) else {
+        return;
+    };
+    let data = params.get("data").and_then(Value::as_str).unwrap_or("");
+    let timestamp_us = params
+        .pointer("/metadata/timestamp")
+        .and_then(Value::as_f64)
+        .map(|seconds| (seconds * 1_000_000.0) as u64)
+        .unwrap_or_else(|| started.elapsed().as_micros() as u64);
+    let _ = client
+        .send(
+            "Page.screencastFrameAck",
+            json!({ "sessionId": screencast_session }),
+            Some(session_id),
+            Duration::from_secs(2),
+        )
+        .await;
+    if data.is_empty() {
+        return;
+    }
+    let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return;
+    };
+    let _ = journal.push(timestamp_us, &jpeg);
+}
+
+async fn collect_screencast_frames(
+    client: Arc<CdpClient>,
+    session_id: String,
+    mut events: broadcast::Receiver<Value>,
+    mut stop_rx: oneshot::Receiver<()>,
+) -> RwResult<video::FinishedJournal> {
+    let mut journal = video::FrameJournal::create()?;
+    let started = Instant::now();
+    loop {
+        tokio::select! {
+            biased;
+            event = events.recv() => {
+                match event {
+                    Ok(event) => {
+                        ingest_screencast_frame(
+                            &client,
+                            &session_id,
+                            &event,
+                            &mut journal,
+                            started,
+                        )
+                        .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = &mut stop_rx => {
+                while let Ok(event) = events.try_recv() {
+                    ingest_screencast_frame(
+                        &client,
+                        &session_id,
+                        &event,
+                        &mut journal,
+                        started,
+                    )
+                    .await;
+                }
+                break;
+            }
+        }
+    }
+    let _ = client
+        .send(
+            "Page.stopScreencast",
+            json!({}),
+            Some(&session_id),
+            Duration::from_secs(5),
+        )
+        .await;
+    journal.finish()
+}
+
+async fn page_start_video_async(
+    page: Arc<PageInner>,
+    path: PathBuf,
+    options: video::VideoStartOptions,
+    timeout: Duration,
+) -> RwResult<()> {
+    let mut slot = page.video.lock().await;
+    if slot.is_some() {
+        return Err(RwError::Message(
+            "video recording is already in progress".to_string(),
+        ));
+    }
+    let client = Arc::clone(&page.browser.client);
+    let session_id = page.session_id.clone();
+    let events = client.subscribe();
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let join = tokio::spawn(collect_screencast_frames(
+        Arc::clone(&client),
+        session_id.clone(),
+        events,
+        stop_rx,
+    ));
+    if let Err(error) = client
+        .send(
+            "Page.startScreencast",
+            json!({
+                "format": "jpeg",
+                "quality": options.quality,
+                "maxWidth": options.max_width,
+                "everyNthFrame": options.every_nth_frame,
+            }),
+            Some(&session_id),
+            timeout,
+        )
+        .await
+    {
+        let _ = stop_tx.send(());
+        let _ = join.await;
+        return Err(error);
+    }
+    *slot = Some(ActiveVideo {
+        stop_tx,
+        join,
+        output_path: path,
+    });
+    Ok(())
+}
+
+async fn page_stop_video_async(page: Arc<PageInner>) -> RwResult<video::VideoRecording> {
+    let mut slot = page.video.lock().await;
+    let Some(active) = slot.take() else {
+        return Err(RwError::Message(
+            "no video recording is in progress".to_string(),
+        ));
+    };
+    drop(slot);
+    let _ = active.stop_tx.send(());
+    let journal = active
+        .join
+        .await
+        .map_err(|error| RwError::Message(format!("video collector failed: {error}")))??;
+    video::write_mjpeg_avi(&journal, &active.output_path)
+}
+
+async fn finalize_page_video(page: &PageInner, write_output: bool) {
+    let mut slot = page.video.lock().await;
+    let Some(active) = slot.take() else {
+        return;
+    };
+    drop(slot);
+    let _ = active.stop_tx.send(());
+    if let Ok(Ok(journal)) = active.join.await {
+        if write_output && journal.frames() > 0 {
+            let _ = video::write_mjpeg_avi(&journal, &active.output_path);
+        }
+    }
+}
+
 async fn page_close_cleanup(
     page: Arc<PageInner>,
     timeout: Duration,
@@ -39501,6 +39716,7 @@ async fn page_close_async(
 ) -> RwResult<()> {
     let lifecycle = Arc::clone(&page.lifecycle);
     single_flight_close(lifecycle, false, move || async move {
+        finalize_page_video(&page, true).await;
         page.clear_worker_resume_handoffs();
         page.abort_iframe_setup_tasks();
         page_close_cleanup(page, timeout, run_before_unload).await
@@ -45118,6 +45334,7 @@ impl RustwrightNavigationHarness {
             target_closed: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
             close_target_on_drop: AtomicBool::new(false),
+            video: tokio::sync::Mutex::new(None),
         });
         Self {
             page: RustwrightPage { inner: page },
@@ -47199,6 +47416,55 @@ return waitForScrollSettle();
         ))
     }
 
+    /// Start capturing an MJPEG AVI of the page via CDP screencast.
+    pub fn start_video(
+        &self,
+        path: &str,
+        quality: Option<u32>,
+        max_width: Option<u32>,
+        every_nth_frame: Option<u32>,
+    ) -> RwResult<()> {
+        self.start_video_with_cancel(path, quality, max_width, every_nth_frame, None)
+    }
+
+    pub fn start_video_with_cancel(
+        &self,
+        path: &str,
+        quality: Option<u32>,
+        max_width: Option<u32>,
+        every_nth_frame: Option<u32>,
+        cancel: Option<&CancelToken>,
+    ) -> RwResult<()> {
+        let options = video::VideoStartOptions::from_optional(quality, max_width, every_nth_frame)?;
+        let path = video::video_output_path(path)?;
+        let page = Arc::clone(&self.inner);
+        let timeout = BrowserInner::command_timeout(self.resolve_timeout(None, false));
+        let browser = Arc::clone(&page.browser);
+        browser.block_on_raw(cancelable(
+            cancel.cloned(),
+            page_start_video_async(page, path, options, timeout),
+        ))
+    }
+
+    /// Stop the active recording and write the AVI to the path given to start.
+    pub fn stop_video(&self) -> RwResult<VideoRecording> {
+        self.stop_video_with_cancel(None)
+    }
+
+    pub fn stop_video_with_cancel(&self, cancel: Option<&CancelToken>) -> RwResult<VideoRecording> {
+        let page = Arc::clone(&self.inner);
+        let browser = Arc::clone(&page.browser);
+        browser.block_on_raw(cancelable(cancel.cloned(), page_stop_video_async(page)))
+    }
+
+    /// Return whether this page currently has an in-flight video recording.
+    pub fn is_recording_video(&self) -> bool {
+        match self.inner.video.try_lock() {
+            Ok(slot) => slot.is_some(),
+            Err(_) => true,
+        }
+    }
+
     pub fn close(&self, timeout_ms: Option<f64>, run_before_unload: bool) -> RwResult<()> {
         let timeout_ms = self.resolve_timeout(timeout_ms, false);
         let page = Arc::clone(&self.inner);
@@ -49212,6 +49478,7 @@ async fn attach_existing_page_unregistered(
                 target_closed: AtomicBool::new(false),
                 crashed: AtomicBool::new(false),
                 close_target_on_drop: AtomicBool::new(false),
+                video: tokio::sync::Mutex::new(None),
             });
             start_page_frame_cache_tracking_with_subscription(
                 &page_inner,
@@ -51913,6 +52180,7 @@ mod native_console_record_tests {
             target_closed: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
             close_target_on_drop: AtomicBool::new(false),
+            video: tokio::sync::Mutex::new(None),
         });
         spawn_page_oopif_event_listener(Arc::downgrade(&page));
 

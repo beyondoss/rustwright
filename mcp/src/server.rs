@@ -20,7 +20,7 @@ use rmcp::{
 };
 
 use crate::{
-    actor::{BrowserActor, BrowserError, BrowserOutput},
+    actor::{BrowserActor, BrowserError, BrowserOp, BrowserOutput},
     config::{FeatureConfig, ResponseBudget},
     shaping::{ResponseShape, shape_error, shape_tool_text, shape_tool_text_with_shape},
     tools::{descriptor, enabled_tool_specs, find_tool, parse_op, validate_tool_configuration},
@@ -45,9 +45,10 @@ impl BrowserServer {
         let screenshot_temp_dir = ScreenshotTempDir::new()?;
         let features = FeatureConfig::from_env();
         Ok(Self {
-            actor: Arc::new(BrowserActor::spawn().map_err(|error| {
-                io::Error::new(io::ErrorKind::Other, error.to_string())
-            })?),
+            actor: Arc::new(
+                BrowserActor::spawn()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?,
+            ),
             screenshot_max_bytes: screenshot_max_bytes_from_env(),
             screenshot_temp_dir,
             features,
@@ -111,6 +112,32 @@ fn screenshot_max_bytes_from_env() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_SCREENSHOT_MAX_BYTES)
         .clamp(1, MAX_SCREENSHOT_MAX_BYTES)
+}
+
+fn next_temp_video_path(temp_dir: &Path) -> Result<String, BrowserError> {
+    for _ in 0..100 {
+        let sequence = NEXT_SCREENSHOT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = temp_dir.join(format!("video-{sequence}.avi"));
+        if path.exists() {
+            continue;
+        }
+        return path
+            .to_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| BrowserError::Message("video temp path is not valid UTF-8".to_owned()));
+    }
+    Err(BrowserError::Message(
+        "video temp file creation failed: no unique name available".to_owned(),
+    ))
+}
+
+fn assign_video_output_path(mut op: BrowserOp, temp_dir: &Path) -> Result<BrowserOp, BrowserError> {
+    if let BrowserOp::StartVideo { path } = &mut op {
+        if path.is_empty() {
+            *path = next_temp_video_path(temp_dir)?;
+        }
+    }
+    Ok(op)
 }
 
 fn write_temp_image(
@@ -264,7 +291,20 @@ impl ServerHandler for BrowserServer {
             }
         };
         let op = match parse_op(spec, request.arguments) {
-            Ok(op) => op,
+            Ok(op) => match assign_video_output_path(op, self.screenshot_temp_dir.path()) {
+                Ok(op) => op,
+                Err(error) => {
+                    return Ok(production_tool_result(
+                        Err(error),
+                        &tool_name,
+                        &request_id,
+                        budget,
+                        true,
+                        self.screenshot_max_bytes,
+                        self.screenshot_temp_dir.path(),
+                    ));
+                }
+            },
             Err(message) => {
                 return Err(shape_error(
                     ErrorData::invalid_params(message, None),

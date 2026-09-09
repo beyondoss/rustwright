@@ -34,6 +34,8 @@ pub enum BrowserAction {
     Url,
     Evaluate { expression: String },
     Screenshot { path: String, full_page: bool },
+    RecordStart { path: String },
+    RecordStop,
     Wait { milliseconds: u64 },
     Status,
     Close,
@@ -178,6 +180,14 @@ impl BrowserSession {
                 let bytes = image_from_output(output)?;
                 fs::write(&path, &bytes).with_context(|| format!("failed to write {path}"))?;
                 Ok(json!({ "path": path, "bytes": bytes.len() }))
+            }
+            BrowserAction::RecordStart { path } => {
+                let text = text_from_output(self.request(BrowserOp::StartVideo { path })?)?;
+                Ok(json!({ "text": text }))
+            }
+            BrowserAction::RecordStop => {
+                let text = text_from_output(self.request(BrowserOp::StopVideo)?)?;
+                Ok(json!({ "text": text }))
             }
             BrowserAction::Wait { milliseconds } => {
                 thread::sleep(Duration::from_millis(milliseconds));
