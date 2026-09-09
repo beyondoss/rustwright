@@ -1277,10 +1277,7 @@ fn schema(kind: ToolKind) -> JsonObject {
         }),
     };
     advertise_cursor_host_metadata(&mut value);
-    value
-        .as_object()
-        .cloned()
-        .unwrap_or_default()
+    value.as_object().cloned().unwrap_or_default()
 }
 
 // Cursor injects `_model_supports_vision` into every MCP tool call and then
@@ -1396,27 +1393,24 @@ mod tests {
             })
             .map(|spec| (spec.name, spec.description))
             .collect();
-        assert_eq!(
-            steering_descriptions,
-            [
-                (
-                    "browser_snapshot",
-                    "Snapshot page. Narrow with target/depth. Refs are session-only and never reused."
-                ),
-                (
-                    "browser_console_messages",
-                    "List bounded console records; filter by level."
-                ),
-                (
-                    "browser_network_requests",
-                    "List/filter bounded requests; use browser_network_request for one."
-                ),
-                (
-                    "browser_get_text",
-                    "Extract text. Use browser_wait_for to validate."
-                ),
-            ]
-        );
+        assert_eq!(steering_descriptions, [
+            (
+                "browser_snapshot",
+                "Snapshot page. Narrow with target/depth. Refs are session-only and never reused."
+            ),
+            (
+                "browser_console_messages",
+                "List bounded console records; filter by level."
+            ),
+            (
+                "browser_network_requests",
+                "List/filter bounded requests; use browser_network_request for one."
+            ),
+            (
+                "browser_get_text",
+                "Extract text. Use browser_wait_for to validate."
+            ),
+        ]);
     }
 
     #[test]
@@ -1467,20 +1461,21 @@ mod tests {
     fn all_descriptors_are_strict_objects() {
         let tools: Vec<Tool> = TOOL_SPECS.iter().copied().map(descriptor).collect();
         assert_eq!(tools.len(), 27);
-        assert!(
-            tools
-                .iter()
-                .all(|tool| tool.input_schema["type"] == "object"
-                    && tool.input_schema["additionalProperties"] == false
-                    && tool.input_schema["properties"]["_model_supports_vision"]
-                        == json!({"type": "boolean"})
-                    && tool.input_schema
-                        .get("required")
-                        .and_then(Value::as_array)
-                        .is_none_or(|required| {
-                            !required.iter().any(|value| value == "_model_supports_vision")
-                        }))
-        );
+        assert!(tools.iter().all(|tool| {
+            tool.input_schema["type"] == "object"
+                && tool.input_schema["additionalProperties"] == false
+                && tool.input_schema["properties"]["_model_supports_vision"]
+                    == json!({"type": "boolean"})
+                && tool
+                    .input_schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_none_or(|required| {
+                        !required
+                            .iter()
+                            .any(|value| value == "_model_supports_vision")
+                    })
+        }));
     }
 
     #[test]
@@ -1758,6 +1753,85 @@ mod tests {
             ),
             "empty-arg tools must accept host-only underscore metadata"
         );
+    }
+
+    fn draft7_root_object_allows(schema: &Value, arguments: &Value) -> Result<(), String> {
+        // Mirrors the host check Cursor applies before send: `additionalProperties:
+        // false` means every argument key must be in `properties`. This is the
+        // layer that still rejected `_model_supports_vision` after parse_op
+        // started ignoring it.
+        let properties = schema["properties"]
+            .as_object()
+            .ok_or("schema is missing properties")?;
+        assert_eq!(schema["additionalProperties"], false);
+        let object = arguments.as_object().ok_or("arguments must be an object")?;
+        for key in object.keys() {
+            if !properties.contains_key(key) {
+                return Err(format!("unexpected {key} argument"));
+            }
+        }
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required {
+                let key = key.as_str().ok_or("required entry must be a string")?;
+                if !object.contains_key(key) {
+                    return Err(format!("missing required argument {key}"));
+                }
+            }
+        }
+        for (key, value) in object {
+            let Some(declared) = properties.get(key) else {
+                continue;
+            };
+            if let Some(expected) = declared.get("type").and_then(Value::as_str) {
+                let matches = match expected {
+                    "string" => value.is_string(),
+                    "boolean" => value.is_boolean(),
+                    "number" => value.is_number(),
+                    _ => true,
+                };
+                if !matches {
+                    return Err(format!("{key} must be {expected}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn published_schema_accepts_cursor_vision_flag_the_host_would_reject() {
+        for spec in TOOL_SPECS {
+            let schema = Value::Object(schema(spec.kind));
+            let mut accepted = Map::new();
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                for key in required {
+                    let key = key.as_str().expect("required key");
+                    let declared = &schema["properties"][key];
+                    accepted.insert(key.to_owned(), match declared.get("type") {
+                        Some(Value::String(ty)) if ty == "number" => json!(1),
+                        Some(Value::String(ty)) if ty == "boolean" => json!(true),
+                        _ => json!("https://example.com"),
+                    });
+                }
+            }
+            let mut with_flag = accepted.clone();
+            with_flag.insert("_model_supports_vision".to_owned(), json!(true));
+            assert_eq!(
+                draft7_root_object_allows(&schema, &Value::Object(with_flag)),
+                Ok(()),
+                "{} schema must accept the Cursor-injected flag",
+                spec.name
+            );
+
+            let mut with_typo = accepted;
+            with_typo.insert("uri".to_owned(), json!("https://example.com"));
+            let error = draft7_root_object_allows(&schema, &Value::Object(with_typo))
+                .expect_err("unknown non-underscore field must fail host validation");
+            assert_eq!(
+                error, "unexpected uri argument",
+                "{} must still reject model typos at the host layer",
+                spec.name
+            );
+        }
     }
 
     #[test]
