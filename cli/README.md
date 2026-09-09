@@ -33,7 +33,7 @@ rustwright-cli title
 rustwright-cli url
 rustwright-cli eval "document.querySelectorAll('a').length"
 rustwright-cli screenshot page.png --full-page
-rustwright-cli record-start clip.avi
+rustwright-cli record-start clip.gif
 rustwright-cli record-stop
 rustwright-cli close
 ```

@@ -180,7 +180,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::RecordVideo,
         name: "browser_record_video",
-        description: "Start/stop MJPEG AVI recording.",
+        description: "Start/stop GIF/AVI recording.",
     },
     ToolSpec {
         kind: ToolKind::Close,

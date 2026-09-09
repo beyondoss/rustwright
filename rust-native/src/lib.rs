@@ -1499,7 +1499,7 @@ impl Page {
         )
     }
 
-    /// Start recording the page to an MJPEG AVI at `path`.
+    /// Start recording the page to a GIF (`.gif`) or MJPEG AVI (`.avi`) at `path`.
     pub fn start_video(&self, path: impl Into<String>, options: VideoOptions) -> Result<()> {
         self.start_video_with_cancel(path, options, None)
     }
@@ -1520,7 +1520,7 @@ impl Page {
         )
     }
 
-    /// Stop the active recording and write the AVI.
+    /// Stop the active recording and write the GIF or AVI.
     pub fn stop_video(&self) -> Result<VideoRecording> {
         self.stop_video_with_cancel(None)
     }

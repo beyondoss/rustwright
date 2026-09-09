@@ -1,12 +1,16 @@
-//! Page video capture helpers: JPEG frame journals and MJPEG AVI muxing.
+//! Page video capture helpers: JPEG frame journals, GIF, and MJPEG AVI muxing.
 //!
 //! Chromium already emits JPEG frames through `Page.startScreencast`. This
-//! module keeps those frames off the CDP event log and packs them into a
-//! widely playable AVI container without an encoder or ffmpeg dependency.
+//! module keeps those frames off the CDP event log and packs them into GIF
+//! (inline on Discord/Slack/Linear) or MJPEG AVI without ffmpeg.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use image::codecs::gif::{GifEncoder, Repeat};
+use image::{Delay, Frame, ImageFormat};
 
 use tempfile::NamedTempFile;
 
@@ -172,6 +176,12 @@ impl FrameJournal {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoContainer {
+    Avi,
+    Gif,
+}
+
 impl FinishedJournal {
     pub fn frames(&self) -> u32 {
         self.frames
@@ -200,11 +210,33 @@ impl FinishedJournal {
     }
 }
 
-pub fn write_mjpeg_avi(
+pub fn write_recording(
     journal: &FinishedJournal,
     output: impl AsRef<Path>,
 ) -> RwResult<VideoRecording> {
     let output = output.as_ref();
+    match video_container(output)? {
+        VideoContainer::Gif => write_gif(journal, output),
+        VideoContainer::Avi => write_mjpeg_avi(journal, output),
+    }
+}
+
+fn video_container(output: &Path) -> RwResult<VideoContainer> {
+    match output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("gif") => Ok(VideoContainer::Gif),
+        Some("avi") | None => Ok(VideoContainer::Avi),
+        Some(other) => Err(RwError::InvalidInput(format!(
+            "unsupported video extension .{other}; use .gif or .avi"
+        ))),
+    }
+}
+
+fn prepare_video_output(journal: &FinishedJournal, output: &Path) -> RwResult<(u32, u32, u64, u32)> {
     if journal.frames == 0 {
         return Err(RwError::Message(
             "video recording captured no frames".to_string(),
@@ -220,6 +252,43 @@ pub fn write_mjpeg_avi(
     let (width, height) = journal.dimensions();
     let duration_us = journal.duration_us();
     let fps = recording_fps(journal.frames, duration_us);
+    Ok((width, height, duration_us, fps))
+}
+
+fn finished_recording(
+    output: &Path,
+    journal: &FinishedJournal,
+    duration_us: u64,
+    fps: u32,
+    width: u32,
+    height: u32,
+) -> RwResult<VideoRecording> {
+    let metadata = fs::metadata(output)
+        .map_err(|error| RwError::Message(format!("video output stat failed: {error}")))?;
+    let path = output
+        .to_str()
+        .ok_or_else(|| RwError::Message("video output path is not valid UTF-8".to_string()))?
+        .to_string();
+    Ok(VideoRecording {
+        path,
+        bytes: metadata.len(),
+        frames: journal.frames,
+        duration_ms: duration_us.div_ceil(1000).max(if journal.frames <= 1 {
+            1_000 / fps as u64
+        } else {
+            0
+        }),
+        width,
+        height,
+    })
+}
+
+pub fn write_mjpeg_avi(
+    journal: &FinishedJournal,
+    output: impl AsRef<Path>,
+) -> RwResult<VideoRecording> {
+    let output = output.as_ref();
+    let (width, height, duration_us, fps) = prepare_video_output(journal, output)?;
     let micros_per_frame = 1_000_000 / fps;
     let mut source = File::open(journal.file.path())
         .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
@@ -288,25 +357,44 @@ pub fn write_mjpeg_avi(
     )?;
     dest.flush().map_err(avi_io_error)?;
     drop(dest);
+    finished_recording(output, journal, duration_us, fps, width, height)
+}
 
-    let metadata = fs::metadata(output)
-        .map_err(|error| RwError::Message(format!("video output stat failed: {error}")))?;
-    let path = output
-        .to_str()
-        .ok_or_else(|| RwError::Message("video output path is not valid UTF-8".to_string()))?
-        .to_string();
-    Ok(VideoRecording {
-        path,
-        bytes: metadata.len(),
-        frames: journal.frames,
-        duration_ms: duration_us.div_ceil(1000).max(if journal.frames <= 1 {
-            1_000 / fps as u64
-        } else {
-            0
-        }),
-        width,
-        height,
-    })
+fn write_gif(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecording> {
+    let (width, height, duration_us, fps) = prepare_video_output(journal, output)?;
+    let delay = Delay::from_saturating_duration(Duration::from_millis(
+        u64::from(1_000 / fps.max(1)).max(10),
+    ));
+    let mut source = File::open(journal.file.path())
+        .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
+    let dest = File::create(output)
+        .map_err(|error| RwError::Message(format!("video output create failed: {error}")))?;
+    let mut encoder = GifEncoder::new_with_speed(dest, 10);
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(|error| RwError::Message(format!("video gif header failed: {error}")))?;
+
+    let mut remaining = journal.frames;
+    while remaining > 0 {
+        let (_timestamp_us, jpeg) = read_journal_frame(&mut source)?;
+        let decoded = image::load_from_memory_with_format(&jpeg, ImageFormat::Jpeg)
+            .map_err(|error| RwError::Message(format!("video jpeg decode failed: {error}")))?;
+        let mut rgba = decoded.to_rgba8();
+        if rgba.width() != width || rgba.height() != height {
+            rgba = image::imageops::resize(
+                &rgba,
+                width,
+                height,
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        encoder
+            .encode_frame(Frame::from_parts(rgba, 0, 0, delay))
+            .map_err(|error| RwError::Message(format!("video gif frame encode failed: {error}")))?;
+        remaining -= 1;
+    }
+    drop(encoder);
+    finished_recording(output, journal, duration_us, fps, width, height)
 }
 
 pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
@@ -553,5 +641,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = write_mjpeg_avi(&journal, dir.path().join("empty.avi")).unwrap_err();
         assert!(error.to_string().contains("no frames"));
+    }
+
+    fn real_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([16, 48, 96]),
+        ));
+        let mut jpeg = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+            .expect("encode jpeg");
+        jpeg
+    }
+
+    #[test]
+    fn muxes_journal_frames_into_gif() {
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = real_jpeg(32, 24);
+        assert!(journal.push(1_000, &jpeg).unwrap());
+        assert!(journal.push(101_000, &jpeg).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.gif");
+        let recording = write_recording(&finished, &path).expect("mux");
+        assert_eq!(recording.frames, 2);
+        assert_eq!(recording.width, 32);
+        assert_eq!(recording.height, 24);
+        let bytes = fs::read(&path).expect("read gif");
+        assert_eq!(&bytes[0..6], b"GIF89a");
+    }
+
+    #[test]
+    fn write_recording_rejects_mp4_extension() {
+        let mut journal = FrameJournal::create().expect("journal");
+        assert!(journal.push(1_000, &jpeg_with_size(8, 8)).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let error = write_recording(&finished, dir.path().join("clip.mp4")).unwrap_err();
+        assert!(error.to_string().contains(".gif"));
     }
 }

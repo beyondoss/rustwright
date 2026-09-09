@@ -64,12 +64,12 @@ enum Commands {
         #[arg(long)]
         full_page: bool,
     },
-    /// Start recording the page to an MJPEG AVI.
+    /// Start recording the page to a GIF or MJPEG AVI.
     RecordStart {
-        #[arg(default_value = "recording.avi")]
+        #[arg(default_value = "recording.gif")]
         path: PathBuf,
     },
-    /// Stop recording and write the AVI.
+    /// Stop recording and write the GIF or AVI.
     RecordStop,
     /// Wait before the next command.
     Wait {
