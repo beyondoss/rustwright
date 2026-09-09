@@ -1620,7 +1620,7 @@ fn real_stdio_tool_profiles_and_evaluation_gate_match_contract() {
     }
 
     let mirror = names(&[("RUSTWRIGHT_MCP_TOOLSET", "mirror")]);
-    assert_eq!(mirror.len(), 27);
+    assert_eq!(mirror.len(), 28);
     assert!(mirror.contains(&"browser_fill_form".to_owned()));
     assert!(mirror.contains(&"browser_console_messages".to_owned()));
     assert!(mirror.contains(&"browser_network_requests".to_owned()));
@@ -1628,9 +1628,10 @@ fn real_stdio_tool_profiles_and_evaluation_gate_match_contract() {
     assert!(mirror.contains(&"browser_file_upload".to_owned()));
     assert!(mirror.contains(&"browser_drag".to_owned()));
     assert!(mirror.contains(&"browser_evaluate".to_owned()));
+    assert!(mirror.contains(&"browser_record_video".to_owned()));
 
     let lean = names(&[("RUSTWRIGHT_MCP_TOOLSET", "lean")]);
-    assert_eq!(lean.len(), 17);
+    assert_eq!(lean.len(), 18);
     assert!(!lean.contains(&"browser_fill_form".to_owned()));
     assert!(!lean.contains(&"browser_console_messages".to_owned()));
     assert!(!lean.contains(&"browser_network_requests".to_owned()));
@@ -1638,13 +1639,15 @@ fn real_stdio_tool_profiles_and_evaluation_gate_match_contract() {
     assert!(!lean.contains(&"browser_file_upload".to_owned()));
     assert!(!lean.contains(&"browser_drag".to_owned()));
     assert!(lean.contains(&"browser_evaluate".to_owned()));
+    assert!(lean.contains(&"browser_record_video".to_owned()));
 
     let no_eval = names(&[
         ("RUSTWRIGHT_MCP_TOOLSET", "lean"),
         ("RUSTWRIGHT_MCP_ALLOW_EVAL", "false"),
     ]);
-    assert_eq!(no_eval.len(), 16);
+    assert_eq!(no_eval.len(), 17);
     assert!(!no_eval.contains(&"browser_evaluate".to_owned()));
+    assert!(no_eval.contains(&"browser_record_video".to_owned()));
 }
 
 #[test]
