@@ -767,7 +767,7 @@ pub enum BrowserOutput {
         shape: ResponseShape,
     },
     Image {
-        bytes: Vec<u8>,
+        base64: String,
         mime: &'static str,
         extension: &'static str,
     },
@@ -776,6 +776,19 @@ pub enum BrowserOutput {
 impl From<String> for BrowserOutput {
     fn from(text: String) -> Self {
         Self::Text(text)
+    }
+}
+
+impl BrowserOutput {
+    pub fn image_bytes(self) -> Result<Vec<u8>, BrowserError> {
+        match self {
+            Self::Image { base64, .. } => STANDARD.decode(base64).map_err(|error| {
+                BrowserError::Message(format!("screenshot decode failed: {error}"))
+            }),
+            Self::Text(_) | Self::ShapedText { .. } => Err(BrowserError::Message(
+                "actor returned text for a screenshot operation".to_owned(),
+            )),
+        }
     }
 }
 
@@ -3008,25 +3021,24 @@ impl BrowserState {
             remaining_override,
             None,
         )?;
-        let units: Vec<String> = value
-            .get("units")
-            .and_then(Value::as_array)
-            .map(|units| {
-                units
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .or_else(|| {
-                value
-                    .get("outline")
-                    .and_then(Value::as_str)
-                    .map(|outline| outline.lines().map(ToOwned::to_owned).collect())
-            })
-            .ok_or_else(|| {
-                BrowserError::Message(format!("snapshot returned no outline: {value}"))
-            })?;
+        let mut value = value;
+        let units: Vec<String> = match value.as_object_mut().and_then(|object| object.remove("units"))
+        {
+            Some(Value::Array(units)) => units
+                .into_iter()
+                .filter_map(|unit| match unit {
+                    Value::String(text) => Some(text),
+                    _ => None,
+                })
+                .collect(),
+            _ => value
+                .get("outline")
+                .and_then(Value::as_str)
+                .map(|outline| outline.lines().map(ToOwned::to_owned).collect())
+                .ok_or_else(|| {
+                    BrowserError::Message(format!("snapshot returned no outline: {value}"))
+                })?,
+        };
         let renderer_incomplete = value
             .get("rendererIncomplete")
             .and_then(Value::as_str)
@@ -5452,7 +5464,7 @@ impl BrowserState {
         request: &ActorRequest,
     ) -> Result<BrowserOutput, BrowserError> {
         let remaining = Self::remaining(request)?;
-        let result = self.ensure_live_page(request)?.screenshot_with_cancel(
+        let result = self.ensure_live_page(request)?.screenshot_base64_with_cancel(
             ScreenshotOptions {
                 timeout: Some(Self::engine_timeout(remaining)),
                 full_page: Some(full_page),
@@ -5461,7 +5473,7 @@ impl BrowserState {
             },
             Some(&request.cancellation.engine),
         );
-        let bytes = result.map_err(|error| {
+        let base64 = result.map_err(|error| {
             self.operation_error(
                 "screenshot failed",
                 error,
@@ -5470,7 +5482,7 @@ impl BrowserState {
             )
         })?;
         Ok(BrowserOutput::Image {
-            bytes,
+            base64,
             mime: image_type.mime(),
             extension: image_type.engine_name(),
         })
@@ -7679,7 +7691,7 @@ mod tests {
             Some(("active".to_owned(), "https://example.test/after".to_owned()));
         let screenshot = state.add_page_digest(
             BrowserOutput::Image {
-                bytes: vec![1, 2, 3],
+                base64: "AQID".to_owned(),
                 mime: "image/png",
                 extension: "png",
             },
@@ -9149,8 +9161,8 @@ mod tests {
     fn output_text(output: &BrowserOutput) -> &str {
         match output {
             BrowserOutput::Text(text) | BrowserOutput::ShapedText { text, .. } => text,
-            BrowserOutput::Image { bytes, mime, .. } => {
-                panic!("expected a text output, got {} {mime} bytes", bytes.len())
+            BrowserOutput::Image { base64, mime, .. } => {
+                panic!("expected a text output, got {} {mime} bytes", base64.len())
             }
         }
     }
