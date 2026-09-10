@@ -79,7 +79,7 @@ Or any MCP client:
 | If... | Do this |
 |---|---|
 | You already have Chrome/Chromium | Set `RUSTWRIGHT_CHROMIUM` (or `CHROME` / `CHROMIUM`) to the executable. |
-| Screenshots are too large to inline | Tune `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES`; oversized captures fall back to a temp-file path. |
+| Screenshots are too large to inline | Tune `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES`; oversized captures omit inline image content and keep the file plus a `resource_link`. |
 
 See [`mcp/README.md`](mcp/README.md) for tools and configuration.
 
