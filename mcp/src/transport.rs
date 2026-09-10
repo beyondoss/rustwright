@@ -131,6 +131,7 @@ where
     }
 }
 
+#[derive(Debug)]
 enum FrameRead {
     Complete,
     Oversized,
@@ -289,17 +290,56 @@ mod tests {
         assert!(transport.line.is_empty());
     }
 
+    const PING_FRAME: &[u8] = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
+"#;
+
+    #[tokio::test]
+    async fn oversized_prefix_leaves_the_next_newline_frame() {
+        let (mut client, input) = tokio::io::duplex(1024);
+        let mut transport = LifecycleStdio::from_io_with_limit(input, tokio::io::sink(), 64);
+        assert!(
+            PING_FRAME.len() < 64,
+            "follow-up ping must fit under the test cap"
+        );
+        let mut inbound = Vec::from([b'x'; 80]);
+        inbound.push(b'\n');
+        inbound.extend_from_slice(PING_FRAME);
+        client.write_all(&inbound).await.expect("write frames");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), transport.read_newline_frame())
+            .await
+            .expect("first frame should not stall")
+            .expect("first frame");
+        assert!(
+            matches!(first, FrameRead::Oversized),
+            "expected oversized, got {first:?} line={:?}",
+            String::from_utf8_lossy(&transport.line)
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), transport.read_newline_frame())
+            .await
+            .expect("second frame should not stall")
+            .expect("second frame");
+        assert!(
+            matches!(second, FrameRead::Complete),
+            "expected complete ping, got {second:?} line={:?}",
+            String::from_utf8_lossy(&transport.line)
+        );
+        assert_eq!(&transport.line[..], PING_FRAME);
+    }
+
     #[tokio::test]
     async fn oversized_frame_is_rejected_without_growing_the_buffer() {
-        let (mut client, input) = tokio::io::duplex(1024);
+        let (mut client, input) = tokio::io::duplex(32 * 1024);
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut transport =
-            LifecycleStdio::from_io_with_limit(input, Capture(std::sync::Arc::clone(&captured)), 32);
-        let ping = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
-"#;
-        let mut inbound = Vec::from([b'x'; 40]);
+        let mut transport = LifecycleStdio::from_io_with_limit(
+            input,
+            Capture(std::sync::Arc::clone(&captured)),
+            64,
+        );
+        let mut inbound = vec![b'x'; 9 * 1024];
         inbound.push(b'\n');
-        inbound.extend_from_slice(ping);
+        inbound.extend_from_slice(PING_FRAME);
         client.write_all(&inbound).await.expect("write frames");
 
         let message = tokio::time::timeout(Duration::from_secs(2), transport.receive())
@@ -312,6 +352,10 @@ mod tests {
         assert_eq!(request.id, RequestId::Number(8));
         assert!(transport.line.is_empty());
         assert!(!transport.discarding_oversized);
+        assert!(
+            transport.line.capacity() < 1024,
+            "discarding must not keep the oversized payload"
+        );
 
         let rejected = captured.lock().expect("capture lock").clone();
         let text = String::from_utf8_lossy(&rejected);
