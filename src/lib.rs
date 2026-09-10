@@ -43,6 +43,7 @@ use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, Uri};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream};
 
+mod process_guard;
 mod startup_timing;
 mod video;
 
@@ -25170,6 +25171,57 @@ mod cdp_write_queue_tests {
         ));
         assert!(write_tx.send(CdpOutgoing::Close).is_ok());
     }
+
+    #[tokio::test]
+    async fn serializer_release_pump_retries_when_write_queue_is_full() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let write_tx = CdpWriteTx {
+            tx,
+            budget: CdpWriteBudget::limited(1),
+        };
+        let (release_tx, release_rx) = mpsc::unbounded_channel();
+        spawn_serializer_release_pump(release_rx, write_tx.clone());
+
+        assert!(
+            write_tx
+                .enqueue(CdpOutgoing::Text {
+                    payload: "hold".to_string(),
+                    tracker: None,
+                    diagnostic_id: None,
+                })
+                .is_ok(),
+            "fill the single write slot"
+        );
+        release_tx
+            .send(SerializerRelease {
+                session_id: "session".to_string(),
+                object_id: "remote-object".to_string(),
+            })
+            .expect("enqueue serializer release");
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(20), rx.recv()).await,
+            Ok(Some(CdpOutgoing::Text { payload, .. })) if payload == "hold"
+        ));
+        write_tx.budget.release();
+
+        let released = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match rx.recv().await {
+                    Some(CdpOutgoing::Text { payload, .. })
+                        if payload.contains("Runtime.releaseObject") =>
+                    {
+                        return payload;
+                    }
+                    Some(_) => {}
+                    None => panic!("write channel closed before release"),
+                }
+            }
+        })
+        .await
+        .expect("pump retried after a slot freed");
+        assert!(released.contains("remote-object"), "{released}");
+    }
 }
 
 const CDP_WRITE_QUEUED: u8 = 0;
@@ -25831,18 +25883,19 @@ fn spawn_serializer_release_pump(
                 "method": "Runtime.releaseObject",
                 "params": { "objectId": release.object_id },
                 "sessionId": release.session_id,
-            });
-            match write_tx.enqueue(CdpOutgoing::Text {
-                payload: payload.to_string(),
-                tracker: None,
-                diagnostic_id: None,
-            }) {
-                Ok(()) => {}
-                Err(CdpWriteEnqueueError::Closed) => break,
-                Err(CdpWriteEnqueueError::QueueFull) => {
-                    eprintln!(
-                        "rustwright: dropping Runtime.releaseObject because the CDP write queue is full"
-                    );
+            })
+            .to_string();
+            loop {
+                match write_tx.enqueue(CdpOutgoing::Text {
+                    payload: payload.clone(),
+                    tracker: None,
+                    diagnostic_id: None,
+                }) {
+                    Ok(()) => break,
+                    Err(CdpWriteEnqueueError::Closed) => return,
+                    Err(CdpWriteEnqueueError::QueueFull) => {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
                 }
             }
         }
@@ -28613,7 +28666,9 @@ impl BrowserInner {
             }
             if !exited {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = process_guard::wait_and_unregister(&mut child);
+            } else {
+                process_guard::unregister(child.id());
             }
         }
 
@@ -28918,7 +28973,9 @@ async fn close_browser_cleanup(browser: Arc<BrowserInner>) -> RwResult<()> {
             }
             if !exited {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = process_guard::wait_and_unregister(&mut child);
+            } else {
+                process_guard::unregister(child.id());
             }
         }
         browser.profile_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
@@ -29585,7 +29642,9 @@ impl NetworkRequestSnapshot {
         let mut retained_ancestors = 0;
         for ancestor_seq in &self.redirect_ancestry {
             if *ancestor_seq < reset_cursor {
-                current.as_object_mut().unwrap().remove("redirected_from");
+                if let Some(object) = current.as_object_mut() {
+                    object.remove("redirected_from");
+                }
                 snapshot.redirect_ancestry.truncate(retained_ancestors);
                 return snapshot;
             }
@@ -29597,9 +29656,28 @@ impl NetworkRequestSnapshot {
             retained_ancestors += 1;
         }
         if current.get("redirected_from").is_some() {
-            current.as_object_mut().unwrap().remove("redirected_from");
+            if let Some(object) = current.as_object_mut() {
+                object.remove("redirected_from");
+            }
         }
         snapshot
+    }
+}
+
+#[cfg(test)]
+mod network_snapshot_safety_tests {
+    use super::*;
+
+    #[test]
+    fn pruning_non_object_request_payloads_does_not_panic() {
+        let snapshot = NetworkRequestSnapshot {
+            seq: 1,
+            request: Value::String("not-an-object".to_string()),
+            redirect_ancestry: vec![0],
+        };
+        let pruned = snapshot.clone_pruning_redirects_before(1);
+        assert_eq!(pruned.request, Value::String("not-an-object".to_string()));
+        assert!(pruned.redirect_ancestry.is_empty());
     }
 }
 
@@ -35873,14 +35951,16 @@ async fn evaluate_locator_dispatch_with_deadline(
                 ));
             }
         };
-        payload.as_object_mut().unwrap().insert(
-            "__rustwrightDispatchId".to_string(),
-            Value::String(dispatch_id.clone()),
-        );
-        payload.as_object_mut().unwrap().insert(
-            "__rustwrightDispatchToken".to_string(),
-            Value::String(dispatch_token.clone()),
-        );
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "__rustwrightDispatchId".to_string(),
+                Value::String(dispatch_id.clone()),
+            );
+            object.insert(
+                "__rustwrightDispatchToken".to_string(),
+                Value::String(dispatch_token.clone()),
+            );
+        }
         let dispatch_guard = match page.browser.client.begin_action_dispatch(
             &resolved.resolution.session_id,
             &dispatch_id,
@@ -45197,8 +45277,7 @@ fn launch_chromium_with_options_cancellation(
     let client = match client_result {
         Ok(client) => client,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            process_guard::kill_and_unregister(&mut child);
             return Err(error);
         }
     };
@@ -45210,8 +45289,7 @@ fn launch_chromium_with_options_cancellation(
         startup_probe.as_deref(),
     ) {
         client.close();
-        let _ = child.kill();
-        let _ = child.wait();
+        process_guard::kill_and_unregister(&mut child);
         return Err(error);
     }
     let browser_probe = startup_probe.clone();
@@ -54733,6 +54811,10 @@ fn launch_chromium_attempt(
     command.arg("about:blank");
 
     launch_phases.transition(startup_timing::Phase::ProcessToEndpoint);
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -54743,9 +54825,9 @@ fn launch_chromium_attempt(
             return Err(RwError::Io(error));
         }
     };
+    process_guard::register(&child);
     if launch_was_cancelled(cancelled.as_ref()) {
-        let _ = child.kill();
-        let _ = child.wait();
+        process_guard::kill_and_unregister(&mut child);
         return Err(RwError::Message("browser launch was cancelled".to_string()));
     }
     #[cfg(unix)]
@@ -54785,9 +54867,9 @@ fn launch_chromium_attempt(
     let ws_endpoint = match ws_endpoint_result {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            if child.try_wait()?.is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
+            match child.try_wait() {
+                Ok(Some(_)) => process_guard::unregister(child.id()),
+                _ => process_guard::kill_and_unregister(&mut child),
             }
             return Err(error);
         }

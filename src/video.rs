@@ -5,7 +5,7 @@
 //! ffmpeg. The default container is VP8 WebM (a real video file). `.gif` is
 //! an explicit image attachment; `.avi` dumps the source JPEGs as MJPEG.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -144,10 +144,15 @@ impl FrameJournal {
         if self.frames >= MAX_VIDEO_FRAMES || self.bytes >= MAX_VIDEO_JOURNAL_BYTES {
             return Ok(false);
         }
-        let framed = 8u64.saturating_add(4).saturating_add(jpeg.len() as u64);
+        let framed = 8u64
+            .saturating_add(4)
+            .saturating_add(u64::try_from(jpeg.len()).unwrap_or(u64::MAX));
         if self.bytes.saturating_add(framed) > MAX_VIDEO_JOURNAL_BYTES {
             return Ok(false);
         }
+        let frame_len = u32::try_from(jpeg.len()).map_err(|_| {
+            RwError::Message("video journal frame exceeds 4 GiB".to_string())
+        })?;
         if self.width == 0 || self.height == 0 {
             if let Some((width, height)) = jpeg_dimensions(jpeg) {
                 self.width = width;
@@ -156,7 +161,7 @@ impl FrameJournal {
         }
         self.writer
             .write_all(&timestamp_us.to_le_bytes())
-            .and_then(|_| self.writer.write_all(&(jpeg.len() as u32).to_le_bytes()))
+            .and_then(|_| self.writer.write_all(&frame_len.to_le_bytes()))
             .and_then(|_| self.writer.write_all(jpeg))
             .map_err(|error| RwError::Message(format!("video journal write failed: {error}")))?;
         self.frames = self.frames.saturating_add(1);
@@ -313,8 +318,11 @@ fn write_webm(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecordi
         remaining -= 1;
     }
     let bytes = mux_webm(width, height, &frames, fps)?;
-    fs::write(output, bytes)
+    let mut dest = create_video_output(output)?;
+    dest.write_all(&bytes)
+        .and_then(|_| dest.flush())
         .map_err(|error| RwError::Message(format!("video webm write failed: {error}")))?;
+    drop(dest);
     finished_recording(output, journal, duration_us, fps, width, height)
 }
 
@@ -522,8 +530,7 @@ pub fn write_mjpeg_avi(
     let micros_per_frame = 1_000_000 / fps;
     let mut source = File::open(journal.file.path())
         .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
-    let mut dest = File::create(output)
-        .map_err(|error| RwError::Message(format!("video output create failed: {error}")))?;
+    let mut dest = create_video_output(output)?;
     dest.write_all(&[0_u8; AVI_HEADER_PREFIX])
         .map_err(avi_io_error)?;
 
@@ -597,8 +604,7 @@ fn write_gif(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecordin
     ));
     let mut source = File::open(journal.file.path())
         .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
-    let dest = File::create(output)
-        .map_err(|error| RwError::Message(format!("video output create failed: {error}")))?;
+    let dest = create_video_output(output)?;
     let mut encoder = GifEncoder::new_with_speed(dest, 10);
     encoder
         .set_repeat(Repeat::Infinite)
@@ -677,13 +683,44 @@ fn recording_fps(frames: u32, duration_us: u64) -> u32 {
     fps.round().clamp(1.0, 60.0) as u32
 }
 
+fn create_video_output(output: &Path) -> RwResult<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(output).map_err(|error| {
+        RwError::Message(format!("video output create failed: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                RwError::Message(format!("video output permission failed: {error}"))
+            })?;
+    }
+    Ok(file)
+}
+
 fn read_journal_frame(source: &mut File) -> RwResult<(u64, Vec<u8>)> {
     let mut header = [0_u8; 12];
     source
         .read_exact(&mut header)
         .map_err(|error| RwError::Message(format!("video journal read failed: {error}")))?;
-    let timestamp_us = u64::from_le_bytes(header[0..8].try_into().expect("timestamp bytes"));
-    let len = u32::from_le_bytes(header[8..12].try_into().expect("length bytes")) as usize;
+    let mut timestamp_bytes = [0_u8; 8];
+    timestamp_bytes.copy_from_slice(&header[0..8]);
+    let mut length_bytes = [0_u8; 4];
+    length_bytes.copy_from_slice(&header[8..12]);
+    let timestamp_us = u64::from_le_bytes(timestamp_bytes);
+    let len = u32::from_le_bytes(length_bytes) as usize;
+    if u64::try_from(len).unwrap_or(u64::MAX) > MAX_VIDEO_JOURNAL_BYTES {
+        return Err(RwError::Message(
+            "video journal frame exceeds the recording cap".to_string(),
+        ));
+    }
     let mut jpeg = vec![0_u8; len];
     source
         .read_exact(&mut jpeg)
@@ -971,5 +1008,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = write_recording(&finished, dir.path().join("clip.mp4")).unwrap_err();
         assert!(error.to_string().contains(".webm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_outputs_are_owner_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = jpeg_with_size(8, 8);
+        assert!(journal.push(1_000, &jpeg).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.avi");
+        write_mjpeg_avi(&finished, &path).expect("mux");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

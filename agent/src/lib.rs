@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt, fs,
     io::{Read as _, Write as _},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, Weak,
@@ -6867,7 +6868,12 @@ fn actor_main(shared: Arc<ActorShared>, startup: BrowserStartup, config: ActorCo
     let mut state = BrowserState::new(startup, config);
     eprintln!("browser actor: ready");
     while let Some(request) = shared.next() {
-        let result = state.run(&request);
+        let result = catch_unwind(AssertUnwindSafe(|| state.run(&request))).unwrap_or_else(|_| {
+            eprintln!("browser actor: command panicked; continuing");
+            Err(BrowserError::Message(
+                "browser actor recovered from an internal panic".to_owned(),
+            ))
+        });
         let result = shared.complete(&request, result);
         let _ = request.reply.send(result);
     }

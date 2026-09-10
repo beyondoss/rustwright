@@ -14,6 +14,7 @@ use tokio::{
 };
 
 const SERVER_NOT_INITIALIZED: i32 = -32002;
+const MAX_STDIO_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Newline-delimited stdio with strict pre-initialize and parse-error responses.
 ///
@@ -25,6 +26,8 @@ pub(crate) struct LifecycleStdio<R = Stdin, W = Stdout> {
     output: Arc<Mutex<W>>,
     line: Vec<u8>,
     initialize_seen: bool,
+    max_frame_bytes: usize,
+    discarding_oversized: bool,
 }
 
 impl LifecycleStdio<Stdin, Stdout> {
@@ -39,11 +42,17 @@ where
     W: Send + AsyncWrite + Unpin + 'static,
 {
     fn from_io(input: R, output: W) -> Self {
+        Self::from_io_with_limit(input, output, MAX_STDIO_FRAME_BYTES)
+    }
+
+    fn from_io_with_limit(input: R, output: W, max_frame_bytes: usize) -> Self {
         Self {
             input: BufReader::new(input),
             output: Arc::new(Mutex::new(output)),
             line: Vec::new(),
             initialize_seen: false,
+            max_frame_bytes,
+            discarding_oversized: false,
         }
     }
 
@@ -71,6 +80,61 @@ where
             Some(id),
         )
     }
+
+    async fn read_newline_frame(&mut self) -> Option<FrameRead> {
+        loop {
+            let buf = match self.input.fill_buf().await {
+                Ok(buf) => buf,
+                Err(error) => {
+                    eprintln!("stdio read failed: {error}");
+                    return None;
+                }
+            };
+            if buf.is_empty() {
+                return None;
+            }
+
+            if self.discarding_oversized {
+                if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+                    self.input.consume(newline + 1);
+                    self.line.clear();
+                    self.discarding_oversized = false;
+                    return Some(FrameRead::Oversized);
+                }
+                let consumed = buf.len();
+                self.input.consume(consumed);
+                continue;
+            }
+
+            if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+                let add = newline + 1;
+                if self.line.len().saturating_add(add) > self.max_frame_bytes {
+                    self.input.consume(add);
+                    self.line.clear();
+                    return Some(FrameRead::Oversized);
+                }
+                self.line.extend_from_slice(&buf[..add]);
+                self.input.consume(add);
+                return Some(FrameRead::Complete);
+            }
+
+            let add = buf.len();
+            if self.line.len().saturating_add(add) > self.max_frame_bytes {
+                self.input.consume(add);
+                self.line.clear();
+                self.discarding_oversized = true;
+                continue;
+            }
+            self.line.extend_from_slice(buf);
+            self.input.consume(add);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FrameRead {
+    Complete,
+    Oversized,
 }
 
 impl<R, W> Transport<RoleServer> for LifecycleStdio<R, W>
@@ -89,13 +153,21 @@ where
 
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
         loop {
-            match self.input.read_until(b'\n', &mut self.line).await {
-                Ok(0) => return None,
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("stdio read failed: {error}");
-                    return None;
+            match self.read_newline_frame().await? {
+                FrameRead::Oversized => {
+                    if let Err(write_error) = self
+                        .send_error(
+                            ErrorData::invalid_request("frame too large", None),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("stdio error response failed: {write_error}");
+                        return None;
+                    }
+                    continue;
                 }
+                FrameRead::Complete => {}
             }
 
             let parsed = {
@@ -109,8 +181,8 @@ where
                 }
                 serde_json::from_slice::<ClientJsonRpcMessage>(line)
             };
-            // `read_until` may be cancelled after appending a partial frame. Keep
-            // that buffer across calls, and clear it synchronously only once a
+            // `read_newline_frame` may be cancelled after appending a partial frame.
+            // Keep that buffer across calls, and clear it synchronously only once a
             // complete newline-delimited frame has been parsed.
             self.line.clear();
 
@@ -216,5 +288,104 @@ mod tests {
         assert_eq!(request.id, RequestId::Number(7));
         assert!(matches!(request.request, ClientRequest::PingRequest(_)));
         assert!(transport.line.is_empty());
+    }
+
+    const PING_FRAME: &[u8] = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
+"#;
+
+    #[tokio::test]
+    async fn oversized_prefix_leaves_the_next_newline_frame() {
+        let (mut client, input) = tokio::io::duplex(1024);
+        let mut transport = LifecycleStdio::from_io_with_limit(input, tokio::io::sink(), 64);
+        assert!(
+            PING_FRAME.len() < 64,
+            "follow-up ping must fit under the test cap"
+        );
+        let mut inbound = Vec::from([b'x'; 80]);
+        inbound.push(b'\n');
+        inbound.extend_from_slice(PING_FRAME);
+        client.write_all(&inbound).await.expect("write frames");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), transport.read_newline_frame())
+            .await
+            .expect("first frame should not stall")
+            .expect("first frame");
+        assert!(
+            matches!(first, FrameRead::Oversized),
+            "expected oversized, got {first:?} line={:?}",
+            String::from_utf8_lossy(&transport.line)
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), transport.read_newline_frame())
+            .await
+            .expect("second frame should not stall")
+            .expect("second frame");
+        assert!(
+            matches!(second, FrameRead::Complete),
+            "expected complete ping, got {second:?} line={:?}",
+            String::from_utf8_lossy(&transport.line)
+        );
+        assert_eq!(&transport.line[..], PING_FRAME);
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_without_growing_the_buffer() {
+        let (mut client, input) = tokio::io::duplex(32 * 1024);
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut transport = LifecycleStdio::from_io_with_limit(
+            input,
+            Capture(std::sync::Arc::clone(&captured)),
+            64,
+        );
+        let mut inbound = vec![b'x'; 9 * 1024];
+        inbound.push(b'\n');
+        inbound.extend_from_slice(PING_FRAME);
+        client.write_all(&inbound).await.expect("write frames");
+
+        let message = tokio::time::timeout(Duration::from_secs(2), transport.receive())
+            .await
+            .expect("receive should not stall after an oversized frame")
+            .expect("receive ping after cap");
+        let ClientJsonRpcMessage::Request(request) = message else {
+            panic!("expected ping request");
+        };
+        assert_eq!(request.id, RequestId::Number(8));
+        assert!(transport.line.is_empty());
+        assert!(!transport.discarding_oversized);
+        assert!(
+            transport.line.capacity() < 1024,
+            "discarding must not keep the oversized payload"
+        );
+
+        let rejected = captured.lock().expect("capture lock").clone();
+        let text = String::from_utf8_lossy(&rejected);
+        assert!(text.contains("frame too large"), "{text}");
+    }
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl tokio::io::AsyncWrite for Capture {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
     }
 }
