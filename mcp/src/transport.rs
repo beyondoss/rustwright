@@ -223,7 +223,7 @@ where
                         }
                         continue;
                     }
-                    _ => continue;
+                    _ => continue,
                 }
             }
 
