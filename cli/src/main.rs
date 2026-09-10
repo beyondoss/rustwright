@@ -64,12 +64,12 @@ enum Commands {
         #[arg(long)]
         full_page: bool,
     },
-    /// Start recording the page to a GIF or MJPEG AVI.
+    /// Start recording the page. Defaults to VP8 WebM; `.gif` and `.avi` select those containers.
     RecordStart {
-        #[arg(default_value = "recording.gif")]
+        #[arg(default_value = "recording.webm")]
         path: PathBuf,
     },
-    /// Stop recording and write the GIF or AVI.
+    /// Stop recording and write the file.
     RecordStop,
     /// Wait before the next command.
     Wait {

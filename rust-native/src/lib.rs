@@ -1499,7 +1499,8 @@ impl Page {
         )
     }
 
-    /// Start recording the page to a GIF (`.gif`) or MJPEG AVI (`.avi`) at `path`.
+    /// Start recording the page to VP8 WebM (`.webm`). Pass `.gif` for an image
+    /// attachment or `.avi` for an MJPEG dump.
     pub fn start_video(&self, path: impl Into<String>, options: VideoOptions) -> Result<()> {
         self.start_video_with_cancel(path, options, None)
     }
@@ -1520,7 +1521,7 @@ impl Page {
         )
     }
 
-    /// Stop the active recording and write the GIF or AVI.
+    /// Stop the active recording and write the container selected by `path`.
     pub fn stop_video(&self) -> Result<VideoRecording> {
         self.stop_video_with_cancel(None)
     }

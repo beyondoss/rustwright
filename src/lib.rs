@@ -47431,7 +47431,7 @@ return waitForScrollSettle();
         ))
     }
 
-    /// Start capturing a GIF or MJPEG AVI of the page via CDP screencast.
+    /// Start capturing VP8 WebM of the page via CDP screencast. `.gif` and `.avi` select those containers.
     pub fn start_video(
         &self,
         path: &str,
@@ -47461,7 +47461,7 @@ return waitForScrollSettle();
         ))
     }
 
-    /// Stop the active recording and write GIF or AVI to the path given to start.
+    /// Stop the active recording and write the container selected by the start path.
     pub fn stop_video(&self) -> RwResult<VideoRecording> {
         self.stop_video_with_cancel(None)
     }

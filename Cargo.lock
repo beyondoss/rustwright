@@ -618,6 +618,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "oxideav-vp8"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f4c0f98d2900480f5c7ad040e5a8f62b88bd3bb0e5cab4f4d9210c1f848c142"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -965,6 +971,7 @@ dependencies = [
  "futures-util",
  "image",
  "libc",
+ "oxideav-vp8",
  "reqwest",
  "rustls",
  "rustls-pki-types",

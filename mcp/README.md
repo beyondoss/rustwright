@@ -85,7 +85,7 @@ accessibility snapshot of the page.
 | `browser_get_text` | Return rendered text for a unique CSS selector. |
 | `browser_evaluate` | Evaluate a JavaScript function in the page or element-ref context. |
 | `browser_take_screenshot` | Capture the page as inline PNG or JPEG image content. |
-| `browser_record_video` | Start or stop a GIF or MJPEG AVI recording of the page; the file path is returned on stop. Use `.gif` for Discord/Slack/Linear. |
+| `browser_record_video` | Start or stop a page recording. Returns a WebM path on stop. |
 | `browser_close` | Close the browser; the next browser operation starts a fresh session. |
 
 Refs are session-scoped and never reused, so a stale ref can never silently

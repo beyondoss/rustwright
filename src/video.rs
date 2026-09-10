@@ -1,8 +1,9 @@
-//! Page video capture helpers: JPEG frame journals, GIF, and MJPEG AVI muxing.
+//! Page video capture helpers: JPEG frame journals and container writers.
 //!
 //! Chromium already emits JPEG frames through `Page.startScreencast`. This
-//! module keeps those frames off the CDP event log and packs them into GIF
-//! (inline on Discord/Slack/Linear) or MJPEG AVI without ffmpeg.
+//! module keeps those frames off the CDP event log and muxes them without
+//! ffmpeg. The default container is VP8 WebM (a real video file). `.gif` is
+//! an explicit image attachment; `.avi` dumps the source JPEGs as MJPEG.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -11,6 +12,8 @@ use std::time::Duration;
 
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame, ImageFormat};
+use oxideav_vp8::encoder::encode_vp8_keyframe;
+use oxideav_vp8::Vp8Frame;
 
 use tempfile::NamedTempFile;
 
@@ -23,6 +26,11 @@ pub const MAX_VIDEO_FRAMES: u32 = 3_600;
 pub const MAX_VIDEO_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_FALLBACK_WIDTH: u32 = 1280;
 const DEFAULT_FALLBACK_HEIGHT: u32 = 720;
+/// VP8 quantizer (0 = best, 127 = worst). Fixed independently of the CDP JPEG
+/// quality knob so agents are not asked to pick a codec setting.
+const VP8_QINDEX: u8 = 36;
+/// SimpleBlock timecodes are signed 16-bit offsets from the cluster timestamp.
+const WEBM_CLUSTER_MAX_MS: u64 = 30_000;
 
 /// Options accepted by [`crate::RustwrightPage::start_video`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,8 +186,9 @@ impl FrameJournal {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VideoContainer {
-    Avi,
+    Webm,
     Gif,
+    Avi,
 }
 
 impl FinishedJournal {
@@ -216,6 +225,7 @@ pub fn write_recording(
 ) -> RwResult<VideoRecording> {
     let output = output.as_ref();
     match video_container(output)? {
+        VideoContainer::Webm => write_webm(journal, output),
         VideoContainer::Gif => write_gif(journal, output),
         VideoContainer::Avi => write_mjpeg_avi(journal, output),
     }
@@ -228,10 +238,11 @@ fn video_container(output: &Path) -> RwResult<VideoContainer> {
         .map(|extension| extension.to_ascii_lowercase())
         .as_deref()
     {
+        Some("webm") | None => Ok(VideoContainer::Webm),
         Some("gif") => Ok(VideoContainer::Gif),
-        Some("avi") | None => Ok(VideoContainer::Avi),
+        Some("avi") => Ok(VideoContainer::Avi),
         Some(other) => Err(RwError::InvalidInput(format!(
-            "unsupported video extension .{other}; use .gif or .avi"
+            "unsupported video extension .{other}; use .webm, .gif, or .avi"
         ))),
     }
 }
@@ -281,6 +292,190 @@ fn finished_recording(
         width,
         height,
     })
+}
+
+fn write_webm(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecording> {
+    let (width, height, duration_us, fps) = prepare_video_output(journal, output)?;
+    let mut source = File::open(journal.file.path())
+        .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
+    let origin_us = journal.first_ts_us.unwrap_or(0);
+    let mut frames = Vec::with_capacity(journal.frames as usize);
+    let mut remaining = journal.frames;
+    while remaining > 0 {
+        let (timestamp_us, jpeg) = read_journal_frame(&mut source)?;
+        let payload = encode_jpeg_vp8_keyframe(&jpeg, width, height)?;
+        let ts_ms = timestamp_us.saturating_sub(origin_us) / 1000;
+        frames.push((ts_ms, payload));
+        remaining -= 1;
+    }
+    let bytes = mux_webm(width, height, &frames)?;
+    fs::write(output, bytes)
+        .map_err(|error| RwError::Message(format!("video webm write failed: {error}")))?;
+    finished_recording(output, journal, duration_us, fps, width, height)
+}
+
+fn encode_jpeg_vp8_keyframe(jpeg: &[u8], width: u32, height: u32) -> RwResult<Vec<u8>> {
+    let decoded = image::load_from_memory_with_format(jpeg, ImageFormat::Jpeg)
+        .map_err(|error| RwError::Message(format!("video jpeg decode failed: {error}")))?;
+    let mut rgb = decoded.to_rgb8();
+    if rgb.width() != width || rgb.height() != height {
+        rgb = image::imageops::resize(&rgb, width, height, image::imageops::FilterType::Triangle);
+    }
+    let frame = rgb_to_vp8_frame(&rgb, width, height);
+    encode_vp8_keyframe(width, height, VP8_QINDEX, &frame)
+        .map_err(|error| RwError::Message(format!("video vp8 encode failed: {error}")))
+}
+
+fn rgb_to_vp8_frame(rgb: &[u8], width: u32, height: u32) -> Vp8Frame {
+    let w = width as usize;
+    let h = height as usize;
+    let chroma_w = w.div_ceil(2);
+    let chroma_h = h.div_ceil(2);
+    let mut y = vec![0_u8; w * h];
+    let mut u = vec![0_u8; chroma_w * chroma_h];
+    let mut v = vec![0_u8; chroma_w * chroma_h];
+    for row in 0..h {
+        for col in 0..w {
+            let i = (row * w + col) * 3;
+            let r = rgb[i] as i32;
+            let g = rgb[i + 1] as i32;
+            let b = rgb[i + 2] as i32;
+            y[row * w + col] = ((66 * r + 129 * g + 25 * b + 128) >> 8).clamp(0, 255) as u8 + 16;
+            if row % 2 == 0 && col % 2 == 0 {
+                let chroma = (row / 2) * chroma_w + (col / 2);
+                u[chroma] = ((-38 * r - 74 * g + 112 * b + 128) >> 8).clamp(0, 255) as u8 + 128;
+                v[chroma] = ((112 * r - 94 * g - 18 * b + 128) >> 8).clamp(0, 255) as u8 + 128;
+            }
+        }
+    }
+    Vp8Frame {
+        width,
+        height,
+        pts: None,
+        y,
+        u,
+        v,
+        y_stride: width,
+        uv_stride: chroma_w as u32,
+    }
+}
+
+fn mux_webm(width: u32, height: u32, frames: &[(u64, Vec<u8>)]) -> RwResult<Vec<u8>> {
+    let mut ebml_body = Vec::new();
+    ebml_body.extend(ebml_elem(&[0x42, 0x86], &[1])?);
+    ebml_body.extend(ebml_elem(&[0x42, 0xF7], &[1])?);
+    ebml_body.extend(ebml_elem(&[0x42, 0xF2], &[4])?);
+    ebml_body.extend(ebml_elem(&[0x42, 0xF3], &[8])?);
+    ebml_body.extend(ebml_elem(&[0x42, 0x82], b"webm")?);
+    ebml_body.extend(ebml_elem(&[0x42, 0x87], &[4])?);
+    ebml_body.extend(ebml_elem(&[0x42, 0x85], &[2])?);
+    let ebml = ebml_elem(&[0x1A, 0x45, 0xDF, 0xA3], &ebml_body)?;
+
+    let mut info = Vec::new();
+    info.extend(ebml_elem(&[0x2A, 0xD7, 0xB1], &1_000_000u64.to_be_bytes()[4..])?);
+    info.extend(ebml_elem(&[0x4D, 0x80], b"rustwright")?);
+    info.extend(ebml_elem(&[0x57, 0x41], b"rustwright")?);
+    let info = ebml_elem(&[0x15, 0x49, 0xA9, 0x66], &info)?;
+
+    let mut video = Vec::new();
+    video.extend(ebml_elem(
+        &[0xB0],
+        &u16::try_from(width).unwrap_or(u16::MAX).to_be_bytes(),
+    )?);
+    video.extend(ebml_elem(
+        &[0xBA],
+        &u16::try_from(height).unwrap_or(u16::MAX).to_be_bytes(),
+    )?);
+    let video = ebml_elem(&[0xE0], &video)?;
+
+    let mut track = Vec::new();
+    track.extend(ebml_elem(&[0xD7], &[1])?);
+    track.extend(ebml_elem(&[0x73, 0xC5], &[1])?);
+    track.extend(ebml_elem(&[0x83], &[1])?);
+    track.extend(ebml_elem(&[0x86], b"V_VP8")?);
+    track.extend(video);
+    let tracks = ebml_elem(&[0x16, 0x54, 0xAE, 0x6B], &ebml_elem(&[0xAE], &track)?)?;
+
+    let mut clusters = Vec::new();
+    let mut cluster_origin = 0_u64;
+    let mut cluster_body = Vec::new();
+    cluster_body.extend(ebml_elem(&[0xE7], &ebml_uint(0))?);
+    for (ts_ms, payload) in frames {
+        if ts_ms.saturating_sub(cluster_origin) > WEBM_CLUSTER_MAX_MS {
+            clusters.extend(ebml_elem(&[0x1F, 0x43, 0xB6, 0x75], &cluster_body)?);
+            cluster_origin = *ts_ms;
+            cluster_body.clear();
+            cluster_body.extend(ebml_elem(&[0xE7], &ebml_uint(cluster_origin))?);
+        }
+        let rel = ts_ms.saturating_sub(cluster_origin).min(i16::MAX as u64) as u16;
+        let mut block = Vec::with_capacity(4 + payload.len());
+        block.push(0x81);
+        block.extend(rel.to_be_bytes());
+        block.push(0x80);
+        block.extend(payload);
+        cluster_body.extend(ebml_elem(&[0xA3], &block)?);
+    }
+    clusters.extend(ebml_elem(&[0x1F, 0x43, 0xB6, 0x75], &cluster_body)?);
+
+    let mut segment = Vec::new();
+    segment.extend(info);
+    segment.extend(tracks);
+    segment.extend(clusters);
+    let segment = ebml_elem(&[0x18, 0x53, 0x80, 0x67], &segment)?;
+
+    let mut out = ebml;
+    out.extend(segment);
+    Ok(out)
+}
+
+fn ebml_elem(id: &[u8], body: &[u8]) -> RwResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(id.len() + 8 + body.len());
+    out.extend_from_slice(id);
+    out.extend(ebml_vint(body.len() as u64)?);
+    out.extend_from_slice(body);
+    Ok(out)
+}
+
+fn ebml_uint(value: u64) -> Vec<u8> {
+    if value == 0 {
+        return vec![0];
+    }
+    let bytes = value.to_be_bytes();
+    let skip = bytes.iter().position(|byte| *byte != 0).unwrap_or(7);
+    bytes[skip..].to_vec()
+}
+
+fn ebml_vint(value: u64) -> RwResult<Vec<u8>> {
+    if value < 0x80 {
+        Ok(vec![0x80 | value as u8])
+    } else if value < 0x4000 {
+        Ok(vec![0x40 | ((value >> 8) as u8), value as u8])
+    } else if value < 0x20_0000 {
+        Ok(vec![
+            0x20 | ((value >> 16) as u8),
+            (value >> 8) as u8,
+            value as u8,
+        ])
+    } else if value < 0x1000_0000 {
+        Ok(vec![
+            0x10 | ((value >> 24) as u8),
+            (value >> 16) as u8,
+            (value >> 8) as u8,
+            value as u8,
+        ])
+    } else if value < 0x8_0000_0000 {
+        Ok(vec![
+            0x08 | ((value >> 32) as u8),
+            (value >> 24) as u8,
+            (value >> 16) as u8,
+            (value >> 8) as u8,
+            value as u8,
+        ])
+    } else {
+        Err(RwError::Message(
+            "video webm element exceeds supported EBML size".to_string(),
+        ))
+    }
 }
 
 pub fn write_mjpeg_avi(
@@ -657,6 +852,38 @@ mod tests {
     }
 
     #[test]
+    fn muxes_journal_frames_into_webm() {
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = real_jpeg(32, 24);
+        assert!(journal.push(1_000, &jpeg).unwrap());
+        assert!(journal.push(101_000, &jpeg).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.webm");
+        let recording = write_recording(&finished, &path).expect("mux");
+        assert_eq!(recording.frames, 2);
+        assert_eq!(recording.width, 32);
+        assert_eq!(recording.height, 24);
+        let bytes = fs::read(&path).expect("read webm");
+        assert_eq!(&bytes[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+        assert!(bytes.windows(4).any(|window| window == b"webm"));
+        assert!(bytes.windows(5).any(|window| window == b"V_VP8"));
+    }
+
+    #[test]
+    fn write_recording_defaults_extensionless_path_to_webm() {
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = real_jpeg(16, 16);
+        assert!(journal.push(1_000, &jpeg).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip");
+        write_recording(&finished, &path).expect("mux");
+        let bytes = fs::read(&path).expect("read default webm");
+        assert_eq!(&bytes[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+    }
+
+    #[test]
     fn muxes_journal_frames_into_gif() {
         let mut journal = FrameJournal::create().expect("journal");
         let jpeg = real_jpeg(32, 24);
@@ -680,6 +907,6 @@ mod tests {
         let finished = journal.finish().expect("finish");
         let dir = tempfile::tempdir().unwrap();
         let error = write_recording(&finished, dir.path().join("clip.mp4")).unwrap_err();
-        assert!(error.to_string().contains(".gif"));
+        assert!(error.to_string().contains(".webm"));
     }
 }
