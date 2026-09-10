@@ -252,7 +252,7 @@ where
 mod tests {
     use std::time::Duration;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -289,38 +289,18 @@ mod tests {
         assert!(transport.line.is_empty());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn oversized_frame_is_rejected_without_growing_the_buffer() {
         let (mut client, input) = tokio::io::duplex(1024);
-        let (output, mut server_out) = tokio::io::duplex(8 * 1024);
-        let mut transport = LifecycleStdio::from_io_with_limit(input, output, 32);
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut transport =
+            LifecycleStdio::from_io_with_limit(input, Capture(std::sync::Arc::clone(&captured)), 32);
         let ping = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
 "#;
         let mut inbound = Vec::from([b'x'; 40]);
         inbound.push(b'\n');
         inbound.extend_from_slice(ping);
         client.write_all(&inbound).await.expect("write frames");
-        client.shutdown().await.expect("close stdin after frames");
-
-        // Drain the error reply while receive() writes it so a full duplex
-        // buffer cannot stall the single consumer loop.
-        let drain = tokio::spawn(async move {
-            let mut rejected = Vec::new();
-            let mut buf = [0_u8; 512];
-            loop {
-                match server_out.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        rejected.extend_from_slice(&buf[..read]);
-                        if rejected.contains(&b'\n') {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            rejected
-        });
 
         let message = tokio::time::timeout(Duration::from_secs(2), transport.receive())
             .await
@@ -333,8 +313,35 @@ mod tests {
         assert!(transport.line.is_empty());
         assert!(!transport.discarding_oversized);
 
-        let rejected = drain.await.expect("drain error reply");
+        let rejected = captured.lock().expect("capture lock").clone();
         let text = String::from_utf8_lossy(&rejected);
         assert!(text.contains("frame too large"), "{text}");
+    }
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl tokio::io::AsyncWrite for Capture {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
     }
 }
