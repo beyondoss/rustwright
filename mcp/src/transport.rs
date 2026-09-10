@@ -14,6 +14,7 @@ use tokio::{
 };
 
 const SERVER_NOT_INITIALIZED: i32 = -32002;
+const MAX_STDIO_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Newline-delimited stdio with strict pre-initialize and parse-error responses.
 ///
@@ -25,6 +26,8 @@ pub(crate) struct LifecycleStdio<R = Stdin, W = Stdout> {
     output: Arc<Mutex<W>>,
     line: Vec<u8>,
     initialize_seen: bool,
+    max_frame_bytes: usize,
+    discarding_oversized: bool,
 }
 
 impl LifecycleStdio<Stdin, Stdout> {
@@ -39,11 +42,17 @@ where
     W: Send + AsyncWrite + Unpin + 'static,
 {
     fn from_io(input: R, output: W) -> Self {
+        Self::from_io_with_limit(input, output, MAX_STDIO_FRAME_BYTES)
+    }
+
+    fn from_io_with_limit(input: R, output: W, max_frame_bytes: usize) -> Self {
         Self {
             input: BufReader::new(input),
             output: Arc::new(Mutex::new(output)),
             line: Vec::new(),
             initialize_seen: false,
+            max_frame_bytes,
+            discarding_oversized: false,
         }
     }
 
@@ -71,6 +80,60 @@ where
             Some(id),
         )
     }
+
+    async fn read_newline_frame(&mut self) -> Option<FrameRead> {
+        loop {
+            let buf = match self.input.fill_buf().await {
+                Ok(buf) => buf,
+                Err(error) => {
+                    eprintln!("stdio read failed: {error}");
+                    return None;
+                }
+            };
+            if buf.is_empty() {
+                return None;
+            }
+
+            if self.discarding_oversized {
+                if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+                    self.input.consume(newline + 1);
+                    self.line.clear();
+                    self.discarding_oversized = false;
+                    return Some(FrameRead::Oversized);
+                }
+                let consumed = buf.len();
+                self.input.consume(consumed);
+                continue;
+            }
+
+            if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+                let add = newline + 1;
+                if self.line.len().saturating_add(add) > self.max_frame_bytes {
+                    self.input.consume(add);
+                    self.line.clear();
+                    return Some(FrameRead::Oversized);
+                }
+                self.line.extend_from_slice(&buf[..add]);
+                self.input.consume(add);
+                return Some(FrameRead::Complete);
+            }
+
+            let add = buf.len();
+            if self.line.len().saturating_add(add) > self.max_frame_bytes {
+                self.input.consume(add);
+                self.line.clear();
+                self.discarding_oversized = true;
+                continue;
+            }
+            self.line.extend_from_slice(buf);
+            self.input.consume(add);
+        }
+    }
+}
+
+enum FrameRead {
+    Complete,
+    Oversized,
 }
 
 impl<R, W> Transport<RoleServer> for LifecycleStdio<R, W>
@@ -89,13 +152,21 @@ where
 
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
         loop {
-            match self.input.read_until(b'\n', &mut self.line).await {
-                Ok(0) => return None,
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("stdio read failed: {error}");
-                    return None;
+            match self.read_newline_frame().await? {
+                FrameRead::Oversized => {
+                    if let Err(write_error) = self
+                        .send_error(
+                            ErrorData::invalid_request("frame too large", None),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("stdio error response failed: {write_error}");
+                        return None;
+                    }
+                    continue;
                 }
+                FrameRead::Complete => {}
             }
 
             let parsed = {
@@ -109,8 +180,8 @@ where
                 }
                 serde_json::from_slice::<ClientJsonRpcMessage>(line)
             };
-            // `read_until` may be cancelled after appending a partial frame. Keep
-            // that buffer across calls, and clear it synchronously only once a
+            // `read_newline_frame` may be cancelled after appending a partial frame.
+            // Keep that buffer across calls, and clear it synchronously only once a
             // complete newline-delimited frame has been parsed.
             self.line.clear();
 
@@ -152,7 +223,7 @@ where
                         }
                         continue;
                     }
-                    _ => continue,
+                    _ => continue;
                 }
             }
 
@@ -181,7 +252,7 @@ where
 mod tests {
     use std::time::Duration;
 
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -216,5 +287,46 @@ mod tests {
         assert_eq!(request.id, RequestId::Number(7));
         assert!(matches!(request.request, ClientRequest::PingRequest(_)));
         assert!(transport.line.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_without_growing_the_buffer() {
+        let (mut client, input) = tokio::io::duplex(1024);
+        let (output, mut server_out) = tokio::io::duplex(1024);
+        let mut transport = LifecycleStdio::from_io_with_limit(input, output, 32);
+        client
+            .write_all(&[b'x'; 40])
+            .await
+            .expect("write oversized prefix");
+        client.write_all(b"\n").await.expect("finish oversized");
+        let ping = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
+"#;
+        client.write_all(ping).await.expect("write ping");
+
+        let message = transport.receive().await.expect("receive ping after cap");
+        let ClientJsonRpcMessage::Request(request) = message else {
+            panic!("expected ping request");
+        };
+        assert_eq!(request.id, RequestId::Number(8));
+        assert!(transport.line.is_empty());
+        assert!(!transport.discarding_oversized);
+
+        let mut rejected = Vec::new();
+        let mut buf = [0_u8; 512];
+        loop {
+            let read = tokio::time::timeout(
+                Duration::from_millis(50),
+                server_out.read(&mut buf),
+            )
+            .await
+            .expect("oversized error response")
+            .expect("read error response");
+            rejected.extend_from_slice(&buf[..read]);
+            if rejected.contains(&b'\n') {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&rejected);
+        assert!(text.contains("frame too large"), "{text}");
     }
 }

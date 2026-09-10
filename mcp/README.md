@@ -56,7 +56,7 @@ other MCP client:
 Drop the `env` block if you installed the managed Chromium instead.
 
 To verify: ask the client to list tools (the default `mirror` profile
-exposes 28 native tools), then
+exposes 27 native tools; 28 with `RUSTWRIGHT_MCP_ALLOW_EVAL=true`), then
 try `browser_navigate` to `https://example.com` — the tool result is an
 accessibility snapshot of the page.
 
@@ -95,9 +95,8 @@ pending dialog details and defer further page work until
 `browser_handle_dialog` resolves it.
 
 Set `RUSTWRIGHT_MCP_TOOLSET=lean` to expose the smaller interaction-oriented
-profile. The default `mirror` profile exposes all 28 native tools.
-`browser_evaluate` can be removed from either profile by setting
-`RUSTWRIGHT_MCP_ALLOW_EVAL=false`. Video files are written to the same private
+profile. The default `mirror` profile exposes 27 native tools.
+`browser_evaluate` is omitted unless `RUSTWRIGHT_MCP_ALLOW_EVAL=true`. Video files are written to the same private
 temp directory as oversized screenshots and last until the server shuts down.
 
 ## Configuration
@@ -110,7 +109,7 @@ temp directory as oversized screenshots and last until the server shuts down.
 | `RUSTWRIGHT_MCP_CDP_TIMEOUT_MS` | Positive remote connection timeout in milliseconds. |
 | `RUSTWRIGHT_MCP_TOOL_TIMEOUT_MS` | Browser tool timeout in milliseconds. |
 | `RUSTWRIGHT_MCP_TOOLSET` | Tool profile: `mirror` (default) or `lean`. |
-| `RUSTWRIGHT_MCP_ALLOW_EVAL` | Enable or disable `browser_evaluate`; defaults to enabled. |
+| `RUSTWRIGHT_MCP_ALLOW_EVAL` | Enable `browser_evaluate` (`true`/`1`/`yes`/`on`). Defaults to disabled. |
 | `RUSTWRIGHT_MCP_WORKSPACE` | Absolute directory that confines file paths supplied to `browser_drop`. |
 | `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES` | Largest screenshot returned inline. Oversized captures are written to a private (0600) temp file and the path is returned instead. |
 | `RUSTWRIGHT_MCP_MAX_RESPONSE_BYTES` | Overrides the default 9 KiB text-response limit. `0` disables this dimension. Values below 4096 or invalid values warn and use the default. |

@@ -591,7 +591,7 @@ fn toolset_profile() -> ToolsetProfile {
 
 fn eval_allowed() -> Result<bool, String> {
     let Ok(raw) = env::var("RUSTWRIGHT_MCP_ALLOW_EVAL") else {
-        return Ok(true);
+        return Ok(false);
     };
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),

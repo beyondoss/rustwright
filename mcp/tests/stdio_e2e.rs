@@ -718,7 +718,14 @@ impl ServerProcess {
                 .env("RUSTWRIGHT_MCP_CDP_TIMEOUT_MS", timeout_ms.to_string());
         }
         for (name, value) in environment {
-            command.env(name, value);
+            if *name == "RUSTWRIGHT_MCP_ALLOW_EVAL" && *value == "__unset__" {
+                continue;
+            }
+            command.env(*name, *value);
+        }
+        if !environment.iter().any(|(name, _)| *name == "RUSTWRIGHT_MCP_ALLOW_EVAL")
+        {
+            command.env("RUSTWRIGHT_MCP_ALLOW_EVAL", "true");
         }
         let mut child = command.spawn().expect("spawn MCP server");
         let input = child.stdin.take().expect("server stdin");
@@ -1648,6 +1655,17 @@ fn real_stdio_tool_profiles_and_evaluation_gate_match_contract() {
     assert_eq!(no_eval.len(), 17);
     assert!(!no_eval.contains(&"browser_evaluate".to_owned()));
     assert!(no_eval.contains(&"browser_record_video".to_owned()));
+
+    let production_mirror = names(&[("RUSTWRIGHT_MCP_ALLOW_EVAL", "__unset__")]);
+    assert_eq!(production_mirror.len(), 27);
+    assert!(!production_mirror.contains(&"browser_evaluate".to_owned()));
+
+    let production_lean = names(&[
+        ("RUSTWRIGHT_MCP_TOOLSET", "lean"),
+        ("RUSTWRIGHT_MCP_ALLOW_EVAL", "__unset__"),
+    ]);
+    assert_eq!(production_lean.len(), 17);
+    assert!(!production_lean.contains(&"browser_evaluate".to_owned()));
 }
 
 #[test]
