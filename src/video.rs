@@ -20,8 +20,13 @@ use tempfile::NamedTempFile;
 use crate::{RwError, RwResult};
 
 pub const DEFAULT_VIDEO_QUALITY: u32 = 80;
-pub const DEFAULT_VIDEO_MAX_WIDTH: u32 = 1280;
-pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 1;
+/// Longest captured edge in CSS pixels. Chromium scales the screencast so
+/// the longer side is at most this (800 keeps a 16:9 clip around 800×450).
+pub const DEFAULT_VIDEO_MAX_WIDTH: u32 = 800;
+/// CDP `Page.startScreencast` has no fps. Chromium emits on compositor paint
+/// (often ~60 Hz when the page is animating). `2` keeps every other paint,
+/// which is ~30 fps from a 60 Hz source.
+pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 2;
 pub const MAX_VIDEO_FRAMES: u32 = 3_600;
 pub const MAX_VIDEO_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_FALLBACK_WIDTH: u32 = 1280;
@@ -862,16 +867,32 @@ mod tests {
     }
 
     #[test]
+    fn video_options_default_to_800px_and_every_second_frame() {
+        assert_eq!(
+            VideoStartOptions::default(),
+            VideoStartOptions {
+                quality: DEFAULT_VIDEO_QUALITY,
+                max_width: 800,
+                every_nth_frame: 2,
+            }
+        );
+        assert_eq!(
+            VideoStartOptions::from_optional(None, None, None).unwrap(),
+            VideoStartOptions::default()
+        );
+    }
+
+    #[test]
     fn video_options_reject_zero_dimensions() {
         assert!(VideoStartOptions::from_optional(Some(0), None, None).is_err());
         assert!(VideoStartOptions::from_optional(None, Some(0), None).is_err());
         assert!(VideoStartOptions::from_optional(None, None, Some(0)).is_err());
         assert_eq!(
-            VideoStartOptions::from_optional(Some(70), Some(800), Some(2)).unwrap(),
+            VideoStartOptions::from_optional(Some(70), Some(1280), Some(1)).unwrap(),
             VideoStartOptions {
                 quality: 70,
-                max_width: 800,
-                every_nth_frame: 2,
+                max_width: 1280,
+                every_nth_frame: 1,
             }
         );
     }

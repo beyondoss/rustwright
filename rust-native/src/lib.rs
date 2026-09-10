@@ -415,13 +415,14 @@ impl VideoOptions {
         self
     }
 
-    /// Longest captured edge in CSS pixels. Defaults to 1280.
+    /// Longest captured edge in CSS pixels. Defaults to 800.
     pub fn max_width(mut self, max_width: u32) -> Self {
         self.max_width = Some(max_width);
         self
     }
 
-    /// Keep one CDP screencast frame out of every N. Defaults to 1.
+    /// Keep one CDP screencast frame out of every N. Defaults to 2 (~30 fps
+    /// from a 60 Hz compositor; Chromium has no fps parameter).
     pub fn every_nth_frame(mut self, every_nth_frame: u32) -> Self {
         self.every_nth_frame = Some(every_nth_frame);
         self
