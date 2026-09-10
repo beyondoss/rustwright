@@ -117,7 +117,7 @@ fn screenshot_max_bytes_from_env() -> usize {
 fn next_temp_video_path(temp_dir: &Path) -> Result<String, BrowserError> {
     for _ in 0..100 {
         let sequence = NEXT_SCREENSHOT_FILE.fetch_add(1, Ordering::Relaxed);
-        let path = temp_dir.join(format!("video-{sequence}.avi"));
+        let path = temp_dir.join(format!("video-{sequence}.webm"));
         if path.exists() {
             continue;
         }

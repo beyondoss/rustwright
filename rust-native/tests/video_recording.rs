@@ -18,7 +18,7 @@ fn launch() -> Option<rustwright::Browser> {
 }
 
 #[test]
-fn page_screencast_records_mjpeg_avi() {
+fn page_screencast_records_webm() {
     let Some(browser) = launch() else {
         return;
     };
@@ -29,7 +29,7 @@ fn page_screencast_records_mjpeg_avi() {
     )
     .expect("goto");
     let output = std::env::temp_dir().join(format!(
-        "rustwright-video-live-{}-{}.avi",
+        "rustwright-video-live-{}-{}.webm",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -56,10 +56,9 @@ fn page_screencast_records_mjpeg_avi() {
         recording.frames
     );
     assert_eq!(recording.path, output.to_string_lossy());
-    let bytes = fs::read(&output).expect("read avi");
-    assert_eq!(&bytes[0..4], b"RIFF");
-    assert_eq!(&bytes[8..12], b"AVI ");
-    assert!(bytes.windows(4).any(|window| window == b"MJPG"));
+    let bytes = fs::read(&output).expect("read webm");
+    assert_eq!(&bytes[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
+    assert!(bytes.windows(5).any(|window| window == b"V_VP8"));
     let _ = fs::remove_file(output);
     page.close(Default::default()).expect("close page");
     browser.close().expect("close browser");

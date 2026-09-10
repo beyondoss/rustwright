@@ -39671,7 +39671,7 @@ async fn page_stop_video_async(page: Arc<PageInner>) -> RwResult<video::VideoRec
         .join
         .await
         .map_err(|error| RwError::Message(format!("video collector failed: {error}")))??;
-    video::write_mjpeg_avi(&journal, &active.output_path)
+    video::write_recording(&journal, &active.output_path)
 }
 
 async fn finalize_page_video(page: &PageInner, write_output: bool) {
@@ -39683,7 +39683,7 @@ async fn finalize_page_video(page: &PageInner, write_output: bool) {
     let _ = active.stop_tx.send(());
     if let Ok(Ok(journal)) = active.join.await {
         if write_output && journal.frames() > 0 {
-            let _ = video::write_mjpeg_avi(&journal, &active.output_path);
+            let _ = video::write_recording(&journal, &active.output_path);
         }
     }
 }
@@ -47431,7 +47431,7 @@ return waitForScrollSettle();
         ))
     }
 
-    /// Start capturing an MJPEG AVI of the page via CDP screencast.
+    /// Start capturing VP8 WebM of the page via CDP screencast. `.gif` and `.avi` select those containers.
     pub fn start_video(
         &self,
         path: &str,
@@ -47461,7 +47461,7 @@ return waitForScrollSettle();
         ))
     }
 
-    /// Stop the active recording and write the AVI to the path given to start.
+    /// Stop the active recording and write the container selected by the start path.
     pub fn stop_video(&self) -> RwResult<VideoRecording> {
         self.stop_video_with_cancel(None)
     }
