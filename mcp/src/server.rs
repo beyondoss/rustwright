@@ -13,8 +13,8 @@ use rmcp::{
     ErrorData, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, CancelledNotificationParam, ContentBlock,
-        Implementation, ListToolsResult, PaginatedRequestParams, RequestId, ServerCapabilities,
-        ServerInfo,
+        Implementation, ListToolsResult, PaginatedRequestParams, RequestId, Resource,
+        ServerCapabilities, ServerInfo,
     },
     service::{NotificationContext, RequestContext, RoleServer},
 };
@@ -140,6 +140,46 @@ fn assign_video_output_path(mut op: BrowserOp, temp_dir: &Path) -> Result<Browse
     Ok(op)
 }
 
+fn path_to_file_uri(path: &Path) -> Result<String, BrowserError> {
+    let raw = path.to_str().ok_or_else(|| {
+        BrowserError::Message("screenshot temp path is not valid UTF-8".to_owned())
+    })?;
+    let mut uri = String::from("file://");
+    // Absolute Unix paths already start with `/`. Windows `C:\...` needs a
+    // leading slash so the URI is `file:///C:/...`.
+    if !raw.starts_with('/') && !raw.starts_with('\\') {
+        uri.push('/');
+    }
+    for byte in raw.bytes() {
+        match byte {
+            b'\\' => uri.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(char::from(byte))
+            }
+            _ => {
+                use std::fmt::Write as _;
+                write!(uri, "%{byte:02X}")
+                    .expect("writing a percent-encoded byte into a String is infallible");
+            }
+        }
+    }
+    Ok(uri)
+}
+
+fn file_resource_link(path: &Path, mime: &str, size: usize) -> Result<ContentBlock, BrowserError> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            BrowserError::Message("screenshot temp path is not valid UTF-8".to_owned())
+        })?;
+    Ok(ContentBlock::resource_link(
+        Resource::new(path_to_file_uri(path)?, name)
+            .with_mime_type(mime)
+            .with_size(size as u64),
+    ))
+}
+
 fn write_temp_image(
     temp_dir: &Path,
     bytes: &[u8],
@@ -183,30 +223,37 @@ fn output_content(
     output: BrowserOutput,
     screenshot_max_bytes: usize,
     screenshot_temp_dir: &Path,
-) -> Result<(ContentBlock, Option<ResponseShape>), BrowserError> {
+) -> Result<(Vec<ContentBlock>, Option<ResponseShape>), BrowserError> {
     match output {
-        BrowserOutput::Text(text) => Ok((ContentBlock::text(text), None)),
-        BrowserOutput::ShapedText { text, shape } => Ok((ContentBlock::text(text), Some(shape))),
+        BrowserOutput::Text(text) => Ok((vec![ContentBlock::text(text)], None)),
+        BrowserOutput::ShapedText { text, shape } => {
+            Ok((vec![ContentBlock::text(text)], Some(shape)))
+        }
         BrowserOutput::Image {
             base64,
             mime,
             extension,
         } => {
             let payload_bytes = base64.len();
-            if payload_bytes <= screenshot_max_bytes {
-                return Ok((ContentBlock::image(base64, mime), None));
-            }
             let bytes = STANDARD.decode(&base64).map_err(|error| {
                 BrowserError::Message(format!("screenshot decode failed: {error}"))
             })?;
             let path = write_temp_image(screenshot_temp_dir, &bytes, extension)?;
-            Ok((
-                ContentBlock::text(format!(
-                    "Screenshot exceeded the inline size cap ({payload_bytes} > {screenshot_max_bytes} bytes); image saved to `{}`.",
-                    path.display()
-                )),
-                None,
-            ))
+            let link = file_resource_link(&path, mime, bytes.len())?;
+            if payload_bytes <= screenshot_max_bytes {
+                Ok((vec![ContentBlock::image(base64, mime), link], None))
+            } else {
+                Ok((
+                    vec![
+                        ContentBlock::text(format!(
+                            "Screenshot exceeded the inline size cap ({payload_bytes} > {screenshot_max_bytes} bytes); image saved to `{}`.",
+                            path.display()
+                        )),
+                        link,
+                    ],
+                    None,
+                ))
+            }
         }
     }
 }
@@ -223,20 +270,23 @@ fn production_tool_result(
     match result
         .and_then(|output| output_content(output, screenshot_max_bytes, screenshot_temp_dir))
     {
-        Ok((ContentBlock::Text(mut text), shape)) => {
+        Ok((mut content, shape)) => {
             if !bypass_response_shaping {
-                text.text = shape_tool_text_with_shape(
-                    tool_name,
-                    text.text,
-                    false,
-                    request_id,
-                    budget,
-                    shape.as_ref(),
-                );
+                for block in &mut content {
+                    if let ContentBlock::Text(text) = block {
+                        text.text = shape_tool_text_with_shape(
+                            tool_name,
+                            std::mem::take(&mut text.text),
+                            false,
+                            request_id,
+                            budget,
+                            shape.as_ref(),
+                        );
+                    }
+                }
             }
-            CallToolResult::success(vec![ContentBlock::Text(text)])
+            CallToolResult::success(content)
         }
-        Ok((content, _)) => CallToolResult::success(vec![content]),
         Err(error) => {
             let metadata = error.structured_metadata();
             let mut result = CallToolResult::error(vec![ContentBlock::text(shape_tool_text(
@@ -599,6 +649,7 @@ mod tests {
         assert_eq!(error.is_error, Some(true));
         assert!(wire(error, &id).len() <= 4096);
 
+        let capture_dir = ScreenshotTempDir::new().expect("screenshot temp dir");
         let image = production_tool_result(
             Ok(BrowserOutput::Image {
                 base64: "AQID".to_owned(),
@@ -610,9 +661,17 @@ mod tests {
             budget,
             false,
             usize::MAX,
-            Path::new("."),
+            capture_dir.path(),
         );
-        assert!(matches!(image.content.as_slice(), [ContentBlock::Image(_)]));
+        assert!(matches!(
+            image.content.as_slice(),
+            [ContentBlock::Image(_), ContentBlock::ResourceLink(_)]
+        ));
+        assert_eq!(
+            capture_file_bytes(&image.content[1]),
+            [1, 2, 3],
+            "under-cap screenshots must still be written to the capture directory"
+        );
     }
 
     #[test]
@@ -691,5 +750,121 @@ mod tests {
             };
             assert_eq!(block.text, text);
         }
+    }
+
+    fn capture_file_bytes(block: &ContentBlock) -> Vec<u8> {
+        let ContentBlock::ResourceLink(link) = block else {
+            panic!("expected a resource_link content block");
+        };
+        let path = file_path_from_uri(&link.uri);
+        assert_eq!(link.mime_type.as_deref(), Some("image/png"));
+        fs::read(&path).unwrap_or_else(|error| {
+            panic!("capture file {} is not readable: {error}", path.display())
+        })
+    }
+
+    fn file_path_from_uri(uri: &str) -> PathBuf {
+        let encoded = uri
+            .strip_prefix("file://")
+            .unwrap_or_else(|| panic!("resource_link URI is not a file URI: {uri}"));
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let raw = encoded.as_bytes();
+        let mut index = 0;
+        while index < raw.len() {
+            if raw[index] == b'%' && index + 2 < raw.len() {
+                let hex = std::str::from_utf8(&raw[index + 1..index + 3]).expect("percent hex");
+                bytes.push(u8::from_str_radix(hex, 16).expect("percent decode"));
+                index += 3;
+            } else {
+                bytes.push(raw[index]);
+                index += 1;
+            }
+        }
+        PathBuf::from(String::from_utf8(bytes).expect("file URI path utf-8"))
+    }
+
+    #[test]
+    fn screenshot_under_cap_is_written_inlined_and_linked() {
+        let dir = ScreenshotTempDir::new().expect("screenshot temp dir");
+        let (content, shape) = output_content(
+            BrowserOutput::Image {
+                base64: "AQID".to_owned(),
+                mime: "image/png",
+                extension: "png",
+            },
+            usize::MAX,
+            dir.path(),
+        )
+        .expect("under-cap screenshot output");
+        assert!(shape.is_none());
+        let [ContentBlock::Image(image), ContentBlock::ResourceLink(link)] = content.as_slice()
+        else {
+            panic!("expected inline image and resource_link, got {content:?}");
+        };
+        assert_eq!(image.data, "AQID");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(link.size, Some(3));
+        assert_eq!(link.mime_type.as_deref(), Some("image/png"));
+        let path = file_path_from_uri(&link.uri);
+        assert!(
+            path.starts_with(dir.path()),
+            "capture {} was not written under {}",
+            path.display(),
+            dir.path().display()
+        );
+        assert_eq!(fs::read(&path).expect("read capture"), [1, 2, 3]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .expect("capture metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn screenshot_over_cap_is_written_and_linked_without_inline_image() {
+        let dir = ScreenshotTempDir::new().expect("screenshot temp dir");
+        let (content, shape) = output_content(
+            BrowserOutput::Image {
+                base64: "AQID".to_owned(),
+                mime: "image/png",
+                extension: "png",
+            },
+            1,
+            dir.path(),
+        )
+        .expect("over-cap screenshot output");
+        assert!(shape.is_none());
+        let [ContentBlock::Text(text), ContentBlock::ResourceLink(link)] = content.as_slice()
+        else {
+            panic!("expected text fallback and resource_link, got {content:?}");
+        };
+        assert!(
+            text.text.contains("4 > 1 bytes"),
+            "over-cap text must report the inline size cap: {}",
+            text.text
+        );
+        let path = file_path_from_uri(&link.uri);
+        assert!(
+            text.text.contains(&path.display().to_string()),
+            "over-cap text must still name the file path: {}",
+            text.text
+        );
+        assert_eq!(fs::read(&path).expect("read capture"), [1, 2, 3]);
+        assert!(
+            !content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image(_)))
+        );
+    }
+
+    #[test]
+    fn path_to_file_uri_percent_encodes_unsafe_bytes() {
+        let uri = path_to_file_uri(Path::new("/tmp/rustwright capture.png")).unwrap();
+        assert_eq!(uri, "file:///tmp/rustwright%20capture.png");
     }
 }

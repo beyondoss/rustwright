@@ -175,7 +175,7 @@ pub(crate) const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         kind: ToolKind::TakeScreenshot,
         name: "browser_take_screenshot",
-        description: "Capture image; fallback lasts until shutdown.",
+        description: "Capture image; file lasts until shutdown.",
     },
     ToolSpec {
         kind: ToolKind::RecordVideo,
@@ -1411,7 +1411,7 @@ mod tests {
         );
         assert!(
             tool_description(&catalog, "browser_take_screenshot")
-                .contains("fallback lasts until shutdown.")
+                .contains("file lasts until shutdown.")
         );
         assert!(
             tool_description(&catalog, "browser_handle_dialog")

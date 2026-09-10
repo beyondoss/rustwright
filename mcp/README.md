@@ -84,7 +84,7 @@ accessibility snapshot of the page.
 | `browser_wait_for` | Wait for time, visible text, or text disappearance. |
 | `browser_get_text` | Return rendered text for a unique CSS selector. |
 | `browser_evaluate` | Evaluate a JavaScript function in the page or element-ref context. |
-| `browser_take_screenshot` | Capture the page as inline PNG or JPEG image content. |
+| `browser_take_screenshot` | Capture the page as PNG or JPEG. The file is always written to the private temp directory; captures that fit the inline size cap are also returned as image content. |
 | `browser_record_video` | Start or stop a page recording. Returns a WebM path on stop. |
 | `browser_close` | Close the browser; the next browser operation starts a fresh session. |
 
@@ -98,7 +98,7 @@ Set `RUSTWRIGHT_MCP_TOOLSET=lean` to expose the smaller interaction-oriented
 profile. The default `mirror` profile exposes all 28 native tools.
 `browser_evaluate` can be removed from either profile by setting
 `RUSTWRIGHT_MCP_ALLOW_EVAL=false`. Video files are written to the same private
-temp directory as oversized screenshots and last until the server shuts down.
+temp directory as screenshots and last until the server shuts down.
 
 ## Configuration
 
@@ -112,7 +112,7 @@ temp directory as oversized screenshots and last until the server shuts down.
 | `RUSTWRIGHT_MCP_TOOLSET` | Tool profile: `mirror` (default) or `lean`. |
 | `RUSTWRIGHT_MCP_ALLOW_EVAL` | Enable or disable `browser_evaluate`; defaults to enabled. |
 | `RUSTWRIGHT_MCP_WORKSPACE` | Absolute directory that confines file paths supplied to `browser_drop`. |
-| `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES` | Largest screenshot returned inline. Oversized captures are written to a private (0600) temp file and the path is returned instead. |
+| `RUSTWRIGHT_MCP_SCREENSHOT_MAX_BYTES` | Largest screenshot returned inline as image content. Every capture is still written to a private (0600) temp file and returned as a `resource_link`; oversized captures omit the inline image and describe the path in text instead. |
 | `RUSTWRIGHT_MCP_MAX_RESPONSE_BYTES` | Overrides the default 9 KiB text-response limit. `0` disables this dimension. Values below 4096 or invalid values warn and use the default. |
 | `RUSTWRIGHT_MCP_MAX_RESPONSE_LINES` | Overrides the default 200-line text-response limit. `0` disables this dimension. Values below 16 or invalid values warn and use the default. |
 

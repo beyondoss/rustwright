@@ -1057,6 +1057,38 @@ fn png_path_from_fallback(text: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("fallback did not contain an absolute PNG path: {text}"))
 }
 
+fn file_uri_to_path(uri: &str) -> PathBuf {
+    let encoded = uri
+        .strip_prefix("file://")
+        .unwrap_or_else(|| panic!("resource_link URI is not a file URI: {uri}"));
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let raw = encoded.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' && index + 2 < raw.len() {
+            let hex = std::str::from_utf8(&raw[index + 1..index + 3]).expect("percent hex");
+            bytes.push(u8::from_str_radix(hex, 16).expect("percent decode"));
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    PathBuf::from(String::from_utf8(bytes).expect("file URI path utf-8"))
+}
+
+fn capture_path_from_resource_link(content: &[Value]) -> PathBuf {
+    let link = content
+        .iter()
+        .find(|item| item["type"] == "resource_link")
+        .unwrap_or_else(|| panic!("missing resource_link in {content:?}"));
+    assert_eq!(
+        link["mimeType"], "image/png",
+        "screenshot resource_link mimeType: {link}"
+    );
+    file_uri_to_path(link["uri"].as_str().expect("resource_link uri"))
+}
+
 fn button_ref(snapshot: &str, name: &str) -> String {
     role_ref(snapshot, "button", name)
 }
@@ -3902,7 +3934,47 @@ fn real_stdio_screenshot_returns_inline_png_image_content() {
         "screenshot content did not decode to a PNG"
     );
 
+    let path = capture_path_from_resource_link(content);
+    assert!(path.is_absolute());
+    let canonical_path = fs::canonicalize(&path).unwrap_or_else(|error| {
+        panic!(
+            "under-cap screenshot path is not readable ({}): {error}",
+            path.display()
+        )
+    });
+    let screenshot_temp_dir = canonical_path
+        .parent()
+        .expect("screenshot parent directory")
+        .to_path_buf();
+    let canonical_temp = fs::canonicalize(std::env::temp_dir()).expect("canonical OS temp dir");
+    assert!(
+        screenshot_temp_dir.parent() == Some(canonical_temp.as_path()),
+        "capture file was not written in a per-server directory under the OS temp dir: {}",
+        screenshot_temp_dir.display()
+    );
+    let on_disk = fs::read(&path).expect("read persisted screenshot");
+    assert_eq!(
+        on_disk, bytes,
+        "persisted screenshot must match inline bytes"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(&path)
+            .expect("screenshot metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "screenshot permissions changed");
+    }
+
     server.finish();
+    assert!(
+        !screenshot_temp_dir.exists(),
+        "server screenshot directory survived graceful shutdown: {}",
+        screenshot_temp_dir.display()
+    );
 }
 
 #[test]
@@ -3966,6 +4038,11 @@ fn real_stdio_screenshot_over_cap_falls_back_to_temp_png_path() {
     );
 
     let path = png_path_from_fallback(text);
+    let linked = capture_path_from_resource_link(content);
+    assert_eq!(
+        path, linked,
+        "resource_link URI must point at the same file named in the fallback text"
+    );
     assert!(path.is_absolute());
     let canonical_path = fs::canonicalize(&path).unwrap_or_else(|error| {
         panic!(
