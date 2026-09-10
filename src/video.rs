@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use image::codecs::gif::{GifEncoder, Repeat};
-use image::{Delay, Frame, ImageFormat};
+use image::{Delay, Frame, ImageFormat, Rgb, RgbImage};
 use oxideav_vp8::encoder::encode_vp8_keyframe;
 use oxideav_vp8::Vp8Frame;
 
@@ -295,7 +295,11 @@ fn finished_recording(
 }
 
 fn write_webm(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecording> {
-    let (width, height, duration_us, fps) = prepare_video_output(journal, output)?;
+    let (raw_width, raw_height, duration_us, fps) = prepare_video_output(journal, output)?;
+    // VP8 4:2:0 and HTML5 players reject odd coded sizes (Chromium screencast
+    // often emits them). Pad rather than scale so the picture is not stretched.
+    let width = even_u32(raw_width);
+    let height = even_u32(raw_height);
     let mut source = File::open(journal.file.path())
         .map_err(|error| RwError::Message(format!("video journal reopen failed: {error}")))?;
     let origin_us = journal.first_ts_us.unwrap_or(0);
@@ -308,19 +312,32 @@ fn write_webm(journal: &FinishedJournal, output: &Path) -> RwResult<VideoRecordi
         frames.push((ts_ms, payload));
         remaining -= 1;
     }
-    let bytes = mux_webm(width, height, &frames)?;
+    let bytes = mux_webm(width, height, &frames, fps)?;
     fs::write(output, bytes)
         .map_err(|error| RwError::Message(format!("video webm write failed: {error}")))?;
     finished_recording(output, journal, duration_us, fps, width, height)
 }
 
+fn even_u32(value: u32) -> u32 {
+    value.saturating_add(value & 1)
+}
+
+fn fit_rgb_frame(rgb: RgbImage, width: u32, height: u32) -> RgbImage {
+    if rgb.width() == width && rgb.height() == height {
+        return rgb;
+    }
+    if rgb.width() > width || rgb.height() > height {
+        return image::imageops::resize(&rgb, width, height, image::imageops::FilterType::Triangle);
+    }
+    let mut padded = RgbImage::from_pixel(width, height, Rgb([0, 0, 0]));
+    image::imageops::replace(&mut padded, &rgb, 0, 0);
+    padded
+}
+
 fn encode_jpeg_vp8_keyframe(jpeg: &[u8], width: u32, height: u32) -> RwResult<Vec<u8>> {
     let decoded = image::load_from_memory_with_format(jpeg, ImageFormat::Jpeg)
         .map_err(|error| RwError::Message(format!("video jpeg decode failed: {error}")))?;
-    let mut rgb = decoded.to_rgb8();
-    if rgb.width() != width || rgb.height() != height {
-        rgb = image::imageops::resize(&rgb, width, height, image::imageops::FilterType::Triangle);
-    }
+    let rgb = fit_rgb_frame(decoded.to_rgb8(), width, height);
     let frame = rgb_to_vp8_frame(&rgb, width, height);
     encode_vp8_keyframe(width, height, VP8_QINDEX, &frame)
         .map_err(|error| RwError::Message(format!("video vp8 encode failed: {error}")))
@@ -360,7 +377,17 @@ fn rgb_to_vp8_frame(rgb: &[u8], width: u32, height: u32) -> Vp8Frame {
     }
 }
 
-fn mux_webm(width: u32, height: u32, frames: &[(u64, Vec<u8>)]) -> RwResult<Vec<u8>> {
+fn webm_duration_ms(frames: &[(u64, Vec<u8>)], fps: u32) -> f64 {
+    let last = frames.last().map(|(timestamp_ms, _)| *timestamp_ms).unwrap_or(0) as f64;
+    last + 1000.0 / f64::from(fps.max(1))
+}
+
+fn mux_webm(
+    width: u32,
+    height: u32,
+    frames: &[(u64, Vec<u8>)],
+    fps: u32,
+) -> RwResult<Vec<u8>> {
     let mut ebml_body = Vec::new();
     ebml_body.extend(ebml_elem(&[0x42, 0x86], &[1])?);
     ebml_body.extend(ebml_elem(&[0x42, 0xF7], &[1])?);
@@ -375,6 +402,11 @@ fn mux_webm(width: u32, height: u32, frames: &[(u64, Vec<u8>)]) -> RwResult<Vec<
     info.extend(ebml_elem(&[0x2A, 0xD7, 0xB1], &1_000_000u64.to_be_bytes()[4..])?);
     info.extend(ebml_elem(&[0x4D, 0x80], b"rustwright")?);
     info.extend(ebml_elem(&[0x57, 0x41], b"rustwright")?);
+    // HTML5 <video> leaves duration NaN without this, so many UIs refuse to play.
+    info.extend(ebml_elem(
+        &[0x44, 0x89],
+        &webm_duration_ms(frames, fps).to_be_bytes(),
+    )?);
     let info = ebml_elem(&[0x15, 0x49, 0xA9, 0x66], &info)?;
 
     let mut video = Vec::new();
@@ -392,7 +424,10 @@ fn mux_webm(width: u32, height: u32, frames: &[(u64, Vec<u8>)]) -> RwResult<Vec<
     track.extend(ebml_elem(&[0xD7], &[1])?);
     track.extend(ebml_elem(&[0x73, 0xC5], &[1])?);
     track.extend(ebml_elem(&[0x83], &[1])?);
+    track.extend(ebml_elem(&[0x9C], &[0])?);
     track.extend(ebml_elem(&[0x86], b"V_VP8")?);
+    let default_duration_ns = 1_000_000_000u64 / u64::from(fps.max(1));
+    track.extend(ebml_elem(&[0x23, 0xE3, 0x83], &ebml_uint(default_duration_ns))?);
     track.extend(video);
     let tracks = ebml_elem(&[0x16, 0x54, 0xAE, 0x6B], &ebml_elem(&[0xAE], &track)?)?;
 
@@ -868,6 +903,34 @@ mod tests {
         assert_eq!(&bytes[0..4], &[0x1A, 0x45, 0xDF, 0xA3]);
         assert!(bytes.windows(4).any(|window| window == b"webm"));
         assert!(bytes.windows(5).any(|window| window == b"V_VP8"));
+        assert!(
+            webm_info_has_duration(&bytes),
+            "HTML5 players need Info/Duration"
+        );
+    }
+
+    fn webm_info_has_duration(bytes: &[u8]) -> bool {
+        let cluster = bytes
+            .windows(4)
+            .position(|window| window == [0x1F, 0x43, 0xB6, 0x75])
+            .unwrap_or(bytes.len());
+        bytes[..cluster]
+            .windows(2)
+            .any(|window| window == [0x44, 0x89])
+    }
+
+    #[test]
+    fn muxes_odd_screencast_size_to_even_vp8() {
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = real_jpeg(15, 13);
+        assert!(journal.push(1_000, &jpeg).unwrap());
+        assert!(journal.push(101_000, &jpeg).unwrap());
+        let finished = journal.finish().expect("finish");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd.webm");
+        let recording = write_recording(&finished, &path).expect("mux");
+        assert_eq!(recording.width, 16);
+        assert_eq!(recording.height, 14);
     }
 
     #[test]
