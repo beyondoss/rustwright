@@ -259,7 +259,7 @@ fn unavoidable(class: &str, actual: usize, id: &RequestId, budget: ResponseBudge
     );
 }
 
-fn tool_wire(text: &str, id: &RequestId, class: ToolClass) -> usize {
+fn tool_wire_serialized(text: &str, id: &RequestId, class: ToolClass) -> usize {
     let result = if class.is_error() {
         CallToolResult::error(vec![ContentBlock::text(text.to_owned())])
     } else {
@@ -269,9 +269,41 @@ fn tool_wire(text: &str, id: &RequestId, class: ToolClass) -> usize {
     serde_json::to_vec(&frame).map_or(usize::MAX, |bytes| bytes.len() + 1)
 }
 
-fn error_wire(error: &ErrorData, id: &RequestId) -> usize {
+fn json_string_encoded_len(text: &str) -> usize {
+    // Match serde_json's default string encoding: quotes, two-byte short
+    // escapes, and `\u00XX` for the remaining control bytes.
+    let mut len = 2;
+    for byte in text.as_bytes() {
+        len += match byte {
+            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
+            0x00..=0x1F => 6,
+            _ => 1,
+        };
+    }
+    len
+}
+
+fn tool_wire(text: &str, id: &RequestId, class: ToolClass) -> usize {
+    let empty = tool_wire_serialized("", id, class);
+    empty
+        .saturating_sub(2)
+        .saturating_add(json_string_encoded_len(text))
+}
+
+fn error_wire_serialized(error: &ErrorData, id: &RequestId) -> usize {
     let frame = ServerJsonRpcMessage::error(error.clone(), Some(id.clone()));
     serde_json::to_vec(&frame).map_or(usize::MAX, |bytes| bytes.len() + 1)
+}
+
+fn error_wire(error: &ErrorData, id: &RequestId) -> usize {
+    let empty = ErrorData {
+        code: error.code,
+        message: Cow::Borrowed(""),
+        data: error.data.clone(),
+    };
+    error_wire_serialized(&empty, id)
+        .saturating_sub(2)
+        .saturating_add(json_string_encoded_len(error.message.as_ref()))
 }
 
 fn tool_fits(text: &str, id: &RequestId, class: ToolClass, budget: ResponseBudget) -> bool {
@@ -1685,5 +1717,34 @@ mod tests {
         )
         .unwrap();
         assert!(shaped.contains(&href));
+    }
+
+    #[test]
+    fn wire_length_model_matches_serialized_envelope() {
+        let id = RequestId::Number(1);
+        for text in [
+            "",
+            "hello",
+            "quote \" backslash \\ newline\n tab\t",
+            "café",
+            "\u{0001}\u{001f}",
+        ] {
+            assert_eq!(
+                tool_wire(text, &id, ToolClass::Success),
+                tool_wire_serialized(text, &id, ToolClass::Success),
+                "success {text:?}"
+            );
+            assert_eq!(
+                tool_wire(text, &id, ToolClass::BrowserError),
+                tool_wire_serialized(text, &id, ToolClass::BrowserError),
+                "error {text:?}"
+            );
+            let error = ErrorData::invalid_params(text.to_owned(), None);
+            assert_eq!(
+                error_wire(&error, &id),
+                error_wire_serialized(&error, &id),
+                "jsonrpc error {text:?}"
+            );
+        }
     }
 }

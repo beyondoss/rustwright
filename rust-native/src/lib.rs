@@ -1448,8 +1448,14 @@ impl Page {
         options: ActionOptions,
         cancel: Option<&CancelToken>,
     ) -> Result<Value> {
-        let json = self.evaluate_wire_with_cancel(expression, arg, options, cancel)?;
-        decode_evaluate_wire(&json)
+        let arg_json = arg.map(serde_json::to_string).transpose()?;
+        let wire = self.inner.evaluate_value_with_cancel(
+            expression,
+            arg_json.as_deref(),
+            options.timeout,
+            cancel,
+        )?;
+        decode_evaluate_tree(wire)
     }
 
     /// Evaluate JavaScript and return the core's tagged JSON wire value.
@@ -1489,6 +1495,24 @@ impl Page {
         let clip_json = options.clip.map(|value| value.to_string());
         self.inner.screenshot_with_cancel(
             options.path.as_deref(),
+            options.full_page,
+            clip_json.as_deref(),
+            options.timeout,
+            options.image_type.as_deref(),
+            options.quality,
+            options.omit_background,
+            cancel,
+        )
+    }
+
+    /// Capture a screenshot and return Chromium's original base64 payload.
+    pub fn screenshot_base64_with_cancel(
+        &self,
+        options: ScreenshotOptions,
+        cancel: Option<&CancelToken>,
+    ) -> Result<String> {
+        let clip_json = options.clip.map(|value| value.to_string());
+        self.inner.screenshot_base64_with_cancel(
             options.full_page,
             clip_json.as_deref(),
             options.timeout,
@@ -1620,10 +1644,15 @@ fn duration_from_timeout_ms(timeout_ms: Option<f64>) -> Duration {
     }
 }
 
+#[cfg(test)]
 fn decode_evaluate_wire(wire_json: &str) -> Result<Value> {
-    let decoded = rustwright_core::decode_wire_value(wire_json)?;
-    let value = serde_json::from_str(&decoded)?;
-    Ok(map_wire_leaves(value))
+    decode_evaluate_tree(serde_json::from_str(wire_json)?)
+}
+
+fn decode_evaluate_tree(wire: Value) -> Result<Value> {
+    Ok(map_wire_leaves(rustwright_core::decode_wire_value_tree(
+        wire,
+    )?))
 }
 
 fn map_wire_leaves(value: Value) -> Value {

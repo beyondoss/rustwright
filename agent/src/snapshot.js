@@ -85,12 +85,6 @@
   const containsSensitiveNode = (el) => sensitiveNodes.has(el);
   const hasSensitiveDescendant = (el) => aggregateSensitive.has(el);
   const styleOf = (el) => getComputedStyle(el);
-  const isVisible = (el, style) => {
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
-    if (el.getAttribute('aria-hidden') === 'true') return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 || rect.height > 0 || el.tagName === 'OPTION';
-  };
   const roleOf = (el) => {
     if (!containsSensitiveNode(el)) {
       const explicit = el.getAttribute('role');
@@ -189,8 +183,11 @@
       if (maxDepth !== null && depth > maxDepth) continue;
       const tag = String(el.tagName || '').toUpperCase();
       if (SKIP_TAGS.has(tag) || el.namespaceURI === 'http://www.w3.org/2000/svg') continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
       const style = styleOf(el);
-      if (!isVisible(el, style)) continue;
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const rect = el.getBoundingClientRect();
+      if (!(rect.width > 0 || rect.height > 0 || tag === 'OPTION')) continue;
       const role = roleOf(el);
       const name = nameOf(el);
       // Marker precedence is semantic role, then explicit DOM markers, then
@@ -202,10 +199,9 @@
       } else if (el.hasAttribute('onclick') || typeof el.onclick === 'function'
           || el.tabIndex >= 0) {
         marker = 'explicit';
-      } else {
+      } else if (style.cursor === 'pointer') {
         const parentStyle = el.parentElement ? styleOf(el.parentElement) : null;
-        if (style.cursor === 'pointer'
-            && (!parentStyle || parentStyle.cursor !== 'pointer')) marker = 'pointer';
+        if (!parentStyle || parentStyle.cursor !== 'pointer') marker = 'pointer';
       }
       const node = {
         el,
