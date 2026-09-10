@@ -23129,6 +23129,65 @@ return this.dataset.mainWorldOverride === "observed";
     }
 
     #[test]
+    fn event_log_push_keeps_screencast_jpeg_on_broadcast_not_in_log() {
+        let mut log = CdpEventLog::new();
+        let jpeg = "a".repeat(4096);
+        let live = log.push(json!({
+            "method": "Page.screencastFrame",
+            "params": {
+                "sessionId": 7,
+                "data": jpeg,
+                "metadata": { "timestamp": 1.0 }
+            }
+        }));
+        assert_eq!(
+            live.pointer("/params/data").and_then(Value::as_str),
+            Some(jpeg.as_str())
+        );
+        let retained = log.entries_since(0);
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].1.pointer("/params/data").is_none());
+        assert_eq!(
+            retained[0]
+                .1
+                .pointer("/params/sessionId")
+                .and_then(Value::as_u64),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn event_log_push_keeps_network_post_body_on_broadcast() {
+        let mut log = CdpEventLog::new();
+        let post = "p".repeat(CDP_RETAINED_STRING_MAX_BYTES * 4);
+        let live = log.push(json!({
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": "req-1",
+                "request": {
+                    "url": "https://example.test/",
+                    "method": "POST",
+                    "postData": post,
+                    "headers": { "Content-Type": "text/plain" }
+                }
+            }
+        }));
+        assert_eq!(
+            live.pointer("/params/request/postData")
+                .and_then(Value::as_str),
+            Some(post.as_str())
+        );
+        let retained = log.entries_since(0);
+        assert!(
+            retained[0]
+                .1
+                .pointer("/params/request/postData")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.len() <= CDP_RETAINED_STRING_MAX_BYTES)
+        );
+    }
+
+    #[test]
     fn retained_network_and_console_payloads_share_the_string_budget() {
         let post = "p".repeat(CDP_RETAINED_STRING_MAX_BYTES * 2);
         let request = request_from_event(
@@ -26094,6 +26153,28 @@ fn truncate_retained_string(text: &str) -> String {
     text[..end].to_owned()
 }
 
+/// Build a compacted copy without cloning oversized strings first.
+fn compact_retained_cdp_value_copy(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(truncate_retained_string(text)),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(CDP_RETAINED_ARRAY_MAX_ITEMS)
+                .map(compact_retained_cdp_value_copy)
+                .collect(),
+        ),
+        Value::Object(values) => {
+            let mut compacted = serde_json::Map::with_capacity(values.len());
+            for (key, child) in values {
+                compacted.insert(key.clone(), compact_retained_cdp_value_copy(child));
+            }
+            Value::Object(compacted)
+        }
+        other => other.clone(),
+    }
+}
+
 fn retained_headers(value: Option<&Value>) -> Value {
     match value {
         Some(Value::Object(headers)) => {
@@ -26107,11 +26188,7 @@ fn retained_headers(value: Option<&Value>) -> Value {
             }
             Value::Object(retained)
         }
-        Some(other) => {
-            let mut value = other.clone();
-            compact_retained_cdp_value(&mut value);
-            value
-        }
+        Some(other) => compact_retained_cdp_value_copy(other),
         None => json!({}),
     }
 }
@@ -26119,41 +26196,21 @@ fn retained_headers(value: Option<&Value>) -> Value {
 fn retained_json_string(value: Option<&Value>) -> Value {
     match value {
         Some(Value::String(text)) => Value::String(truncate_retained_string(text)),
-        Some(other) => {
-            let mut value = other.clone();
-            compact_retained_cdp_value(&mut value);
-            value
-        }
+        Some(other) => compact_retained_cdp_value_copy(other),
         None => Value::Null,
     }
 }
 
 fn retained_post_data_entries(value: Option<&Value>) -> Value {
     match value {
-        Some(Value::Array(entries)) => {
-            let mut retained = Vec::with_capacity(entries.len().min(CDP_RETAINED_ARRAY_MAX_ITEMS));
-            for entry in entries.iter().take(CDP_RETAINED_ARRAY_MAX_ITEMS) {
-                let mut entry = entry.clone();
-                if let Some(object) = entry.as_object_mut() {
-                    if let Some(Value::String(text)) = object.get_mut("bytes") {
-                        *text = truncate_retained_string(text);
-                    } else {
-                        for value in object.values_mut() {
-                            compact_retained_cdp_value(value);
-                        }
-                    }
-                } else {
-                    compact_retained_cdp_value(&mut entry);
-                }
-                retained.push(entry);
-            }
-            Value::Array(retained)
-        }
-        Some(other) => {
-            let mut value = other.clone();
-            compact_retained_cdp_value(&mut value);
-            value
-        }
+        Some(Value::Array(entries)) => Value::Array(
+            entries
+                .iter()
+                .take(CDP_RETAINED_ARRAY_MAX_ITEMS)
+                .map(compact_retained_cdp_value_copy)
+                .collect(),
+        ),
+        Some(other) => compact_retained_cdp_value_copy(other),
         None => Value::Null,
     }
 }
@@ -26201,6 +26258,101 @@ fn strip_retained_heavy_payloads(event: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[derive(Default)]
+struct DetachedHeavyPayloads {
+    screencast_data: Option<Value>,
+    post_data: Option<Value>,
+    post_data_entries: Option<Value>,
+    console_args: Option<Value>,
+}
+
+/// Move oversized mirrored payloads out of `event` so a subsequent clone for the
+/// retained log does not copy screencast JPEG / POST bodies / console args.
+fn detach_retained_heavy_payloads(event: &mut Value) -> DetachedHeavyPayloads {
+    let method = event.get("method").and_then(Value::as_str).unwrap_or("");
+    match method {
+        "Network.requestWillBeSent" => {
+            let Some(request) = event
+                .pointer_mut("/params/request")
+                .and_then(Value::as_object_mut)
+            else {
+                return DetachedHeavyPayloads::default();
+            };
+            DetachedHeavyPayloads {
+                post_data: request.remove("postData"),
+                post_data_entries: request.remove("postDataEntries"),
+                ..DetachedHeavyPayloads::default()
+            }
+        }
+        "Runtime.consoleAPICalled" => DetachedHeavyPayloads {
+            console_args: event
+                .pointer_mut("/params")
+                .and_then(Value::as_object_mut)
+                .and_then(|params| params.remove("args")),
+            ..DetachedHeavyPayloads::default()
+        },
+        "Page.screencastFrame" => DetachedHeavyPayloads {
+            screencast_data: event
+                .pointer_mut("/params")
+                .and_then(Value::as_object_mut)
+                .and_then(|params| params.remove("data")),
+            ..DetachedHeavyPayloads::default()
+        },
+        _ => DetachedHeavyPayloads::default(),
+    }
+}
+
+fn seed_retained_heavy_payloads(event: &mut Value, detached: &DetachedHeavyPayloads) {
+    if let Some(request) = event
+        .pointer_mut("/params/request")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(post_data) = &detached.post_data {
+            request.insert(
+                "postData".to_string(),
+                compact_retained_cdp_value_copy(post_data),
+            );
+        }
+        if let Some(entries) = &detached.post_data_entries {
+            request.insert(
+                "postDataEntries".to_string(),
+                retained_post_data_entries(Some(entries)),
+            );
+        }
+    }
+    if let Some(args) = &detached.console_args {
+        if let Some(params) = event.pointer_mut("/params").and_then(Value::as_object_mut) {
+            params.insert("args".to_string(), compact_retained_cdp_value_copy(args));
+        }
+    }
+}
+
+fn restore_retained_heavy_payloads(event: &mut Value, detached: DetachedHeavyPayloads) {
+    if let Some(data) = detached.screencast_data {
+        if let Some(params) = event.pointer_mut("/params").and_then(Value::as_object_mut) {
+            params.insert("data".to_string(), data);
+        }
+    }
+    if detached.post_data.is_some() || detached.post_data_entries.is_some() {
+        if let Some(request) = event
+            .pointer_mut("/params/request")
+            .and_then(Value::as_object_mut)
+        {
+            if let Some(post_data) = detached.post_data {
+                request.insert("postData".to_string(), post_data);
+            }
+            if let Some(entries) = detached.post_data_entries {
+                request.insert("postDataEntries".to_string(), entries);
+            }
+        }
+    }
+    if let Some(args) = detached.console_args {
+        if let Some(params) = event.pointer_mut("/params").and_then(Value::as_object_mut) {
+            params.insert("args".to_string(), args);
+        }
     }
 }
 
@@ -26561,7 +26713,14 @@ impl CdpEventLog {
                 Value::Number(seq.into()),
             );
         }
-        let (retained_event, retained_bytes) = compact_retained_cdp_event(event.clone());
+        let (retained_event, retained_bytes) = {
+            let detached = detach_retained_heavy_payloads(&mut event);
+            let mut retained = event.clone();
+            seed_retained_heavy_payloads(&mut retained, &detached);
+            let retained = compact_retained_cdp_event(retained);
+            restore_retained_heavy_payloads(&mut event, detached);
+            retained
+        };
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
         self.events.push_back(CdpEventLogEntry {
             sequence: seq,
@@ -33130,11 +33289,20 @@ fn evaluate_expression_for_page_raw_cancelable(
     timeout_ms: Option<f64>,
     cancel: Option<&CancelToken>,
 ) -> RwResult<String> {
+    Ok(evaluate_value_for_page_raw_cancelable(page, expression, timeout_ms, cancel)?.to_string())
+}
+
+fn evaluate_value_for_page_raw_cancelable(
+    page: Arc<PageInner>,
+    expression: String,
+    timeout_ms: Option<f64>,
+    cancel: Option<&CancelToken>,
+) -> RwResult<Value> {
     let timeout = BrowserInner::command_timeout(timeout_ms);
     let browser = Arc::clone(&page.browser);
     browser.block_on_raw(cancelable(
         cancel.cloned(),
-        evaluate_expression_for_page_async(page, expression, timeout),
+        evaluate_value_for_page_async(page, expression, timeout),
     ))
 }
 
@@ -33177,13 +33345,23 @@ async fn evaluate_expression_for_page_async(
     expression: String,
     timeout: Duration,
 ) -> RwResult<String> {
+    Ok(evaluate_value_for_page_async(page, expression, timeout)
+        .await?
+        .to_string())
+}
+
+async fn evaluate_value_for_page_async(
+    page: Arc<PageInner>,
+    expression: String,
+    timeout: Duration,
+) -> RwResult<Value> {
     let realm_identity = page
         .main_frame_id
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_deref()
         .map(|frame_id| format!("frame:{frame_id}"));
-    evaluate_expression_in_session(
+    evaluate_expression_in_session_value(
         &page.browser.client,
         &page.session_id,
         realm_identity.as_deref(),
@@ -34695,6 +34873,22 @@ async fn evaluate_serialized_expression_before(
     expression: &str,
     deadline: OperationDeadline,
 ) -> RwResult<String> {
+    Ok(
+        evaluate_serialized_expression_value_before(
+            client, realm, context_id, expression, deadline,
+        )
+        .await?
+        .to_string(),
+    )
+}
+
+async fn evaluate_serialized_expression_value_before(
+    client: &CdpClient,
+    realm: &SerializerRealmKey,
+    context_id: Option<&Value>,
+    expression: &str,
+    deadline: OperationDeadline,
+) -> RwResult<Value> {
     if is_script_goal_evaluate_expression(expression) {
         let result = send_inline_serialized_evaluate(
             client,
@@ -34704,7 +34898,7 @@ async fn evaluate_serialized_expression_before(
             deadline.remaining()?,
         )
         .await?;
-        return runtime_inline_evaluate_serialized_result_to_json(&result);
+        return runtime_inline_evaluate_serialized_result_to_value(result);
     }
 
     let function_declaration = serialize_evaluate_result_function(expression);
@@ -34738,7 +34932,7 @@ async fn evaluate_serialized_expression_before(
         }
         result => result?,
     };
-    runtime_evaluate_serialized_result_to_json(&result, 1, expected_wrapper_line)
+    runtime_evaluate_serialized_result_to_value(result, 1, expected_wrapper_line)
 }
 
 fn arguments_with_serializer(arguments: Option<&Value>, serializer_object_id: &str) -> Value {
@@ -34913,10 +35107,29 @@ async fn evaluate_expression_in_session(
     expression: &str,
     timeout: Duration,
 ) -> RwResult<String> {
-    evaluate_expression_in_session_before(
+    Ok(evaluate_expression_in_session_value(
         client,
         session_id,
         realm_identity,
+        expression,
+        timeout,
+    )
+    .await?
+    .to_string())
+}
+
+async fn evaluate_expression_in_session_value(
+    client: &CdpClient,
+    session_id: &str,
+    realm_identity: Option<&str>,
+    expression: &str,
+    timeout: Duration,
+) -> RwResult<Value> {
+    let realm = client.serializer_realm_key(session_id, realm_identity);
+    evaluate_serialized_expression_value_before(
+        client,
+        &realm,
+        None,
         expression,
         OperationDeadline::new(timeout),
     )
@@ -39523,6 +39736,61 @@ async fn page_screenshot_async(
     quality: Option<u32>,
     omit_background: bool,
 ) -> RwResult<Vec<u8>> {
+    let base64_data = capture_screenshot_base64_async(
+        page,
+        capture_beyond_viewport,
+        clip,
+        timeout,
+        image_type,
+        quality,
+        omit_background,
+    )
+    .await?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|error| RwError::Message(error.to_string()))?;
+    if let Some(path) = path {
+        Ok(tokio::task::spawn_blocking(move || {
+            std::fs::write(path, &bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(|error| RwError::Message(error.to_string()))??)
+    } else {
+        Ok(bytes)
+    }
+}
+
+async fn page_screenshot_base64_async(
+    page: Arc<PageInner>,
+    capture_beyond_viewport: bool,
+    clip: Option<Value>,
+    timeout: Duration,
+    image_type: String,
+    quality: Option<u32>,
+    omit_background: bool,
+) -> RwResult<String> {
+    capture_screenshot_base64_async(
+        page,
+        capture_beyond_viewport,
+        clip,
+        timeout,
+        image_type,
+        quality,
+        omit_background,
+    )
+    .await
+}
+
+async fn capture_screenshot_base64_async(
+    page: Arc<PageInner>,
+    capture_beyond_viewport: bool,
+    clip: Option<Value>,
+    timeout: Duration,
+    image_type: String,
+    quality: Option<u32>,
+    omit_background: bool,
+) -> RwResult<String> {
     let client = Arc::clone(&page.browser.client);
     let session_id = page.session_id.clone();
     let transparent_background = omit_background && image_type != "jpeg";
@@ -39567,24 +39835,12 @@ async fn page_screenshot_async(
         }
     }
     let result = capture_result?;
-    let bytes = {
-        let base64_data = result.get("data").and_then(Value::as_str).unwrap_or("");
-        base64::engine::general_purpose::STANDARD
-            .decode(base64_data)
-            .map_err(|error| RwError::Message(error.to_string()))?
-    };
-    // Drop the CDP reply before returning so base64 JSON and decoded bytes do
-    // not stack. Write any path from the same Vec without cloning the frame.
-    drop(result);
-    if let Some(path) = path {
-        Ok(tokio::task::spawn_blocking(move || {
-            std::fs::write(path, &bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        })
-        .await
-        .map_err(|error| RwError::Message(error.to_string()))??)
-    } else {
-        Ok(bytes)
+    match result {
+        Value::Object(mut object) => match object.remove("data") {
+            Some(Value::String(data)) => Ok(data),
+            _ => Ok(String::new()),
+        },
+        _ => Ok(String::new()),
     }
 }
 
@@ -46859,9 +47115,22 @@ impl RustwrightPage {
         timeout_ms: Option<f64>,
         cancel: Option<&CancelToken>,
     ) -> RwResult<String> {
+        Ok(self
+            .evaluate_value_with_cancel(expression, arg_json, timeout_ms, cancel)?
+            .to_string())
+    }
+
+    /// Evaluate JavaScript and return the decoded wire tree without stringifying.
+    pub fn evaluate_value_with_cancel(
+        &self,
+        expression: &str,
+        arg_json: Option<&str>,
+        timeout_ms: Option<f64>,
+        cancel: Option<&CancelToken>,
+    ) -> RwResult<Value> {
         let timeout_ms = self.resolve_timeout(timeout_ms, false);
         let expression = make_evaluate_expression(expression, arg_json);
-        evaluate_expression_for_page_raw_cancelable(
+        evaluate_value_for_page_raw_cancelable(
             Arc::clone(&self.inner),
             expression,
             timeout_ms,
@@ -47499,6 +47768,43 @@ return waitForScrollSettle();
             page_screenshot_async(
                 page,
                 path,
+                capture_beyond_viewport,
+                clip,
+                timeout,
+                image_type,
+                quality,
+                omit_background,
+            ),
+        ))
+    }
+
+    /// Capture a screenshot and return Chromium's original base64 payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn screenshot_base64_with_cancel(
+        &self,
+        full_page: Option<bool>,
+        clip_json: Option<&str>,
+        timeout_ms: Option<f64>,
+        image_type: Option<&str>,
+        quality: Option<u32>,
+        omit_background: Option<bool>,
+        cancel: Option<&CancelToken>,
+    ) -> RwResult<String> {
+        let timeout_ms = self.resolve_timeout(timeout_ms, false);
+        let page = Arc::clone(&self.inner);
+        let timeout = BrowserInner::command_timeout(timeout_ms);
+        let capture_beyond_viewport = full_page.unwrap_or(false);
+        let image_type = image_type.unwrap_or("png").to_string();
+        let clip = match clip_json {
+            Some(value) => Some(serde_json::from_str::<Value>(value)?),
+            None => None,
+        };
+        let browser = Arc::clone(&page.browser);
+        let omit_background = omit_background.unwrap_or(false);
+        browser.block_on_raw(cancelable(
+            cancel.cloned(),
+            page_screenshot_base64_async(
+                page,
                 capture_beyond_viewport,
                 clip,
                 timeout,
@@ -59925,11 +60231,19 @@ fn is_wire_leaf(object: &serde_json::Map<String, Value>) -> bool {
 /// represent object identity, a reference to an active ancestor (a true cycle)
 /// is replaced with `{"__rustwright_cdp_cycle__": true}`. Leaf scalar tags are
 /// preserved verbatim for language bindings to map to native values.
-pub fn decode_wire_value(json: &str) -> Result<String, RwError> {
-    let wire = serde_json::from_str::<Value>(json)?;
+pub fn decode_wire_value_tree(wire: Value) -> Result<Value, RwError> {
     let mut decoder = WireValueDecoder::new(&wire)?;
-    let decoded = decoder.decode(wire)?;
-    serde_json::to_string(&decoded).map_err(RwError::from)
+    decoder.decode(wire)
+}
+
+/// Parse a JSON wire payload and decode it into a plain JSON tree.
+pub fn decode_wire_json(json: &str) -> Result<Value, RwError> {
+    decode_wire_value_tree(serde_json::from_str(json)?)
+}
+
+/// Decode the core evaluate wire format into a JSON string.
+pub fn decode_wire_value(json: &str) -> Result<String, RwError> {
+    serde_json::to_string(&decode_wire_json(json)?).map_err(RwError::from)
 }
 
 #[cfg(test)]
@@ -61000,11 +61314,11 @@ fn normalize_serialized_evaluate_exception_stack(
         .join("\n")
 }
 
-fn runtime_evaluate_serialized_result_to_json(
-    result: &Value,
+fn runtime_evaluate_serialized_result_to_value(
+    result: Value,
     stack_line_offset: usize,
     expected_wrapper_line: usize,
-) -> RwResult<String> {
+) -> RwResult<Value> {
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(RwError::Message(
             normalize_serialized_evaluate_exception_stack(
@@ -61014,56 +61328,95 @@ fn runtime_evaluate_serialized_result_to_json(
             ),
         ));
     }
-    runtime_serialized_result_to_json(result)
+    take_runtime_serialized_value(result)
 }
 
-fn runtime_inline_evaluate_serialized_result_to_json(result: &Value) -> RwResult<String> {
+fn runtime_inline_evaluate_serialized_result_to_value(result: Value) -> RwResult<Value> {
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(RwError::Message(runtime_exception_message(exception)));
     }
-    runtime_serialized_result_to_json(result)
+    take_runtime_serialized_value(result)
 }
 
-fn runtime_result_to_json(result: &Value) -> RwResult<String> {
+fn runtime_result_value(result: &Value) -> RwResult<Value> {
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(RwError::Message(runtime_exception_message(exception)));
     }
     let remote = result.get("result").unwrap_or(&Value::Null);
-    let value = if remote
+    if remote
         .get("type")
         .and_then(Value::as_str)
         .map(|value| value == "undefined")
         .unwrap_or(false)
     {
-        Value::Null
-    } else if let Some(value) = remote.get("value") {
-        value.clone()
-    } else if let Some(value) = remote.get("unserializableValue").and_then(Value::as_str) {
-        json!({ "__rustwright_cdp_unserializable_value__": value })
-    } else {
-        Value::Null
+        return Ok(Value::Null);
+    }
+    if let Some(value) = remote.get("value") {
+        return Ok(value.clone());
+    }
+    if let Some(value) = remote.get("unserializableValue").and_then(Value::as_str) {
+        return Ok(json!({ "__rustwright_cdp_unserializable_value__": value }));
+    }
+    Ok(Value::Null)
+}
+
+fn runtime_result_to_json(result: &Value) -> RwResult<String> {
+    Ok(runtime_result_value(result)?.to_string())
+}
+
+fn is_undefined_wire_marker(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 1
+            && object
+                .get("__rustwright_cdp_undefined__")
+                .and_then(Value::as_bool)
+                == Some(true)
+    })
+}
+
+fn take_runtime_result_value(result: &mut Value) -> Value {
+    let Some(remote) = result.get_mut("result") else {
+        return Value::Null;
     };
-    Ok(value.to_string())
+    if remote
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|value| value == "undefined")
+        .unwrap_or(false)
+    {
+        return Value::Null;
+    }
+    if let Some(value) = remote
+        .as_object_mut()
+        .and_then(|object| object.remove("value"))
+    {
+        return value;
+    }
+    if let Some(value) = remote.get("unserializableValue").and_then(Value::as_str) {
+        return json!({ "__rustwright_cdp_unserializable_value__": value });
+    }
+    Value::Null
+}
+
+fn take_runtime_serialized_value(mut result: Value) -> RwResult<Value> {
+    if result
+        .pointer("/result/value")
+        .is_some_and(is_undefined_wire_marker)
+    {
+        return Ok(Value::Null);
+    }
+    Ok(take_runtime_result_value(&mut result))
 }
 
 fn runtime_serialized_result_to_json(result: &Value) -> RwResult<String> {
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(RwError::Message(runtime_exception_message(exception)));
     }
-    if let Some(value) = result.pointer("/result/value") {
-        if value
-            .as_object()
-            .map(|object| {
-                object.len() == 1
-                    && object
-                        .get("__rustwright_cdp_undefined__")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-            })
-            .unwrap_or(false)
-        {
-            return Ok(Value::Null.to_string());
-        }
+    if result
+        .pointer("/result/value")
+        .is_some_and(is_undefined_wire_marker)
+    {
+        return Ok(Value::Null.to_string());
     }
     runtime_result_to_json(result)
 }

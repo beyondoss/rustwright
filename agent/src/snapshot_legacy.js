@@ -58,9 +58,9 @@
   ]);
 
   const isVisible = (el) => {
+    if (el.getAttribute('aria-hidden') === 'true') return false;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
-    if (el.getAttribute('aria-hidden') === 'true') return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 || rect.height > 0 || el.tagName === 'OPTION';
   };

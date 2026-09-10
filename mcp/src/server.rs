@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use base64::{Engine as _, encoded_len, engine::general_purpose::STANDARD};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rmcp::{
     ErrorData, ServerHandler,
     model::{
@@ -188,14 +188,17 @@ fn output_content(
         BrowserOutput::Text(text) => Ok((ContentBlock::text(text), None)),
         BrowserOutput::ShapedText { text, shape } => Ok((ContentBlock::text(text), Some(shape))),
         BrowserOutput::Image {
-            bytes,
+            base64,
             mime,
             extension,
         } => {
-            let payload_bytes = encoded_len(bytes.len(), true).unwrap_or(usize::MAX);
+            let payload_bytes = base64.len();
             if payload_bytes <= screenshot_max_bytes {
-                return Ok((ContentBlock::image(STANDARD.encode(bytes), mime), None));
+                return Ok((ContentBlock::image(base64, mime), None));
             }
+            let bytes = STANDARD.decode(&base64).map_err(|error| {
+                BrowserError::Message(format!("screenshot decode failed: {error}"))
+            })?;
             let path = write_temp_image(screenshot_temp_dir, &bytes, extension)?;
             Ok((
                 ContentBlock::text(format!(
@@ -598,7 +601,7 @@ mod tests {
 
         let image = production_tool_result(
             Ok(BrowserOutput::Image {
-                bytes: vec![1, 2, 3],
+                base64: "AQID".to_owned(),
                 mime: "image/png",
                 extension: "png",
             }),

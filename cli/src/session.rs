@@ -378,12 +378,9 @@ fn text_and_shape(output: BrowserOutput) -> Result<(String, Option<ResponseShape
 }
 
 fn image_from_output(output: BrowserOutput) -> Result<Vec<u8>> {
-    match output {
-        BrowserOutput::Image { bytes, .. } => Ok(bytes),
-        BrowserOutput::Text(_) | BrowserOutput::ShapedText { .. } => {
-            bail!("actor returned text for a screenshot operation")
-        }
-    }
+    output
+        .image_bytes()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 enum ActorTarget {
