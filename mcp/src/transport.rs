@@ -289,21 +289,43 @@ mod tests {
         assert!(transport.line.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn oversized_frame_is_rejected_without_growing_the_buffer() {
         let (mut client, input) = tokio::io::duplex(1024);
-        let (output, mut server_out) = tokio::io::duplex(1024);
+        let (output, mut server_out) = tokio::io::duplex(8 * 1024);
         let mut transport = LifecycleStdio::from_io_with_limit(input, output, 32);
-        client
-            .write_all(&[b'x'; 40])
-            .await
-            .expect("write oversized prefix");
-        client.write_all(b"\n").await.expect("finish oversized");
         let ping = br#"{"jsonrpc":"2.0","id":8,"method":"ping","params":{}}
 "#;
-        client.write_all(ping).await.expect("write ping");
+        let mut inbound = Vec::from([b'x'; 40]);
+        inbound.push(b'\n');
+        inbound.extend_from_slice(ping);
+        client.write_all(&inbound).await.expect("write frames");
+        client.shutdown().await.expect("close stdin after frames");
 
-        let message = transport.receive().await.expect("receive ping after cap");
+        // Drain the error reply while receive() writes it so a full duplex
+        // buffer cannot stall the single consumer loop.
+        let drain = tokio::spawn(async move {
+            let mut rejected = Vec::new();
+            let mut buf = [0_u8; 512];
+            loop {
+                match server_out.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        rejected.extend_from_slice(&buf[..read]);
+                        if rejected.contains(&b'\n') {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            rejected
+        });
+
+        let message = tokio::time::timeout(Duration::from_secs(2), transport.receive())
+            .await
+            .expect("receive should not stall after an oversized frame")
+            .expect("receive ping after cap");
         let ClientJsonRpcMessage::Request(request) = message else {
             panic!("expected ping request");
         };
@@ -311,21 +333,7 @@ mod tests {
         assert!(transport.line.is_empty());
         assert!(!transport.discarding_oversized);
 
-        let mut rejected = Vec::new();
-        let mut buf = [0_u8; 512];
-        loop {
-            let read = tokio::time::timeout(
-                Duration::from_millis(50),
-                server_out.read(&mut buf),
-            )
-            .await
-            .expect("oversized error response")
-            .expect("read error response");
-            rejected.extend_from_slice(&buf[..read]);
-            if rejected.contains(&b'\n') {
-                break;
-            }
-        }
+        let rejected = drain.await.expect("drain error reply");
         let text = String::from_utf8_lossy(&rejected);
         assert!(text.contains("frame too large"), "{text}");
     }
