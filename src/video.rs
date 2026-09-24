@@ -23,10 +23,21 @@ pub const DEFAULT_VIDEO_QUALITY: u32 = 80;
 /// Longest captured edge in CSS pixels. Chromium scales the screencast so
 /// the longer side is at most this (800 keeps a 16:9 clip around 800×450).
 pub const DEFAULT_VIDEO_MAX_WIDTH: u32 = 800;
-/// CDP `Page.startScreencast` has no fps. Chromium emits on compositor paint
-/// (often ~60 Hz when the page is animating). `2` keeps every other paint,
-/// which is ~30 fps from a 60 Hz source.
-pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 2;
+/// CDP `Page.startScreencast` has no fps. Chromium emits a frame only when
+/// the compositor paints, so a still page costs nothing however long the
+/// recording runs, and an animating page runs at its own rate (often ~60 Hz).
+/// Ask for every paint: skipping alternate frames here made a recording of
+/// one interaction (a click, then one paint for the result) come back as a
+/// single frame, because the result's paint was the skipped one. The rate is
+/// capped by time instead, in [`FrameJournal`], which can tell a burst from
+/// the only frame that matters.
+pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 1;
+/// Frames closer together than this are a burst (an animation, a scroll):
+/// the journal keeps one per interval and the last one of the burst, so the
+/// clip stays near 30 fps at most while a frame that follows a pause, or ends
+/// a burst, is always kept. Every WebM frame is a keyframe, so this is what
+/// bounds file size and encode time for animated pages.
+pub const DEFAULT_VIDEO_MIN_FRAME_INTERVAL_US: u64 = 1_000_000 / 30;
 pub const MAX_VIDEO_FRAMES: u32 = 3_600;
 pub const MAX_VIDEO_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_FALLBACK_WIDTH: u32 = 1280;
@@ -108,6 +119,12 @@ pub struct FrameJournal {
     last_ts_us: Option<u64>,
     width: u32,
     height: u32,
+    /// Bursts are thinned to one frame per this many microseconds.
+    min_interval_us: u64,
+    /// The newest frame that arrived inside the current interval. Written
+    /// when the burst ends (the next frame is a full interval away) or when the
+    /// journal finishes, so the final state is never lost to thinning.
+    pending: Option<(u64, Vec<u8>)>,
 }
 
 #[derive(Debug)]
@@ -137,15 +154,45 @@ impl FrameJournal {
             last_ts_us: None,
             width: 0,
             height: 0,
+            min_interval_us: DEFAULT_VIDEO_MIN_FRAME_INTERVAL_US,
+            pending: None,
         })
     }
 
-    /// Append one JPEG frame. Returns `false` when the journal is at a cap and
+    /// Thin bursts to one frame per `min_interval_us`; `0` keeps every frame.
+    pub fn with_min_frame_interval_us(mut self, min_interval_us: u64) -> Self {
+        self.min_interval_us = min_interval_us;
+        self
+    }
+
+    /// Offer one JPEG frame. The first frame, and any frame at least an
+    /// interval after the last kept one, is written at once. A frame inside the
+    /// interval is held as the burst's newest and written when the burst ends
+    /// or the journal finishes. Returns `false` when the journal is at a cap and
     /// the frame was dropped (the caller should still ACK the screencast).
     pub fn push(&mut self, timestamp_us: u64, jpeg: &[u8]) -> RwResult<bool> {
         if jpeg.is_empty() {
             return Ok(true);
         }
+        let Some(last_kept) = self.last_ts_us else {
+            return self.write_frame(timestamp_us, jpeg);
+        };
+        if timestamp_us.saturating_sub(last_kept) < self.min_interval_us {
+            self.pending = Some((timestamp_us, jpeg.to_vec()));
+            return Ok(true);
+        }
+        // The burst is over. Its last frame was on screen from its own
+        // timestamp until now; keep it when that was long enough to see, drop
+        // it when this frame replaced it within an interval.
+        if let Some((pending_ts, pending_jpeg)) = self.pending.take() {
+            if timestamp_us.saturating_sub(pending_ts) >= self.min_interval_us {
+                self.write_frame(pending_ts, &pending_jpeg)?;
+            }
+        }
+        self.write_frame(timestamp_us, jpeg)
+    }
+
+    fn write_frame(&mut self, timestamp_us: u64, jpeg: &[u8]) -> RwResult<bool> {
         if self.frames >= MAX_VIDEO_FRAMES || self.bytes >= MAX_VIDEO_JOURNAL_BYTES {
             return Ok(false);
         }
@@ -155,9 +202,8 @@ impl FrameJournal {
         if self.bytes.saturating_add(framed) > MAX_VIDEO_JOURNAL_BYTES {
             return Ok(false);
         }
-        let frame_len = u32::try_from(jpeg.len()).map_err(|_| {
-            RwError::Message("video journal frame exceeds 4 GiB".to_string())
-        })?;
+        let frame_len = u32::try_from(jpeg.len())
+            .map_err(|_| RwError::Message("video journal frame exceeds 4 GiB".to_string()))?;
         if self.width == 0 || self.height == 0 {
             if let Some((width, height)) = jpeg_dimensions(jpeg) {
                 self.width = width;
@@ -179,6 +225,9 @@ impl FrameJournal {
     }
 
     pub fn finish(mut self) -> RwResult<FinishedJournal> {
+        if let Some((pending_ts, pending_jpeg)) = self.pending.take() {
+            self.write_frame(pending_ts, &pending_jpeg)?;
+        }
         self.writer
             .flush()
             .map_err(|error| RwError::Message(format!("video journal flush failed: {error}")))?;
@@ -257,7 +306,10 @@ fn video_container(output: &Path) -> RwResult<VideoContainer> {
     }
 }
 
-fn prepare_video_output(journal: &FinishedJournal, output: &Path) -> RwResult<(u32, u32, u64, u32)> {
+fn prepare_video_output(
+    journal: &FinishedJournal,
+    output: &Path,
+) -> RwResult<(u32, u32, u64, u32)> {
     if journal.frames == 0 {
         return Err(RwError::Message(
             "video recording captured no frames".to_string(),
@@ -391,16 +443,14 @@ fn rgb_to_vp8_frame(rgb: &[u8], width: u32, height: u32) -> Vp8Frame {
 }
 
 fn webm_duration_ms(frames: &[(u64, Vec<u8>)], fps: u32) -> f64 {
-    let last = frames.last().map(|(timestamp_ms, _)| *timestamp_ms).unwrap_or(0) as f64;
+    let last = frames
+        .last()
+        .map(|(timestamp_ms, _)| *timestamp_ms)
+        .unwrap_or(0) as f64;
     last + 1000.0 / f64::from(fps.max(1))
 }
 
-fn mux_webm(
-    width: u32,
-    height: u32,
-    frames: &[(u64, Vec<u8>)],
-    fps: u32,
-) -> RwResult<Vec<u8>> {
+fn mux_webm(width: u32, height: u32, frames: &[(u64, Vec<u8>)], fps: u32) -> RwResult<Vec<u8>> {
     let mut ebml_body = Vec::new();
     ebml_body.extend(ebml_elem(&[0x42, 0x86], &[1])?);
     ebml_body.extend(ebml_elem(&[0x42, 0xF7], &[1])?);
@@ -412,7 +462,10 @@ fn mux_webm(
     let ebml = ebml_elem(&[0x1A, 0x45, 0xDF, 0xA3], &ebml_body)?;
 
     let mut info = Vec::new();
-    info.extend(ebml_elem(&[0x2A, 0xD7, 0xB1], &1_000_000u64.to_be_bytes()[4..])?);
+    info.extend(ebml_elem(
+        &[0x2A, 0xD7, 0xB1],
+        &1_000_000u64.to_be_bytes()[4..],
+    )?);
     info.extend(ebml_elem(&[0x4D, 0x80], b"rustwright")?);
     info.extend(ebml_elem(&[0x57, 0x41], b"rustwright")?);
     // HTML5 <video> leaves duration NaN without this, so many UIs refuse to play.
@@ -440,7 +493,10 @@ fn mux_webm(
     track.extend(ebml_elem(&[0x9C], &[0])?);
     track.extend(ebml_elem(&[0x86], b"V_VP8")?);
     let default_duration_ns = 1_000_000_000u64 / u64::from(fps.max(1));
-    track.extend(ebml_elem(&[0x23, 0xE3, 0x83], &ebml_uint(default_duration_ns))?);
+    track.extend(ebml_elem(
+        &[0x23, 0xE3, 0x83],
+        &ebml_uint(default_duration_ns),
+    )?);
     track.extend(video);
     let tracks = ebml_elem(&[0x16, 0x54, 0xAE, 0x6B], &ebml_elem(&[0xAE], &track)?)?;
 
@@ -696,9 +752,9 @@ fn create_video_output(output: &Path) -> RwResult<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(output).map_err(|error| {
-        RwError::Message(format!("video output create failed: {error}"))
-    })?;
+    let file = options
+        .open(output)
+        .map_err(|error| RwError::Message(format!("video output create failed: {error}")))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -867,13 +923,13 @@ mod tests {
     }
 
     #[test]
-    fn video_options_default_to_800px_and_every_second_frame() {
+    fn video_options_default_to_800px_and_every_frame() {
         assert_eq!(
             VideoStartOptions::default(),
             VideoStartOptions {
                 quality: DEFAULT_VIDEO_QUALITY,
                 max_width: 800,
-                every_nth_frame: 2,
+                every_nth_frame: 1,
             }
         );
         assert_eq!(
@@ -895,6 +951,74 @@ mod tests {
                 every_nth_frame: 1,
             }
         );
+    }
+
+    fn kept_timestamps(timestamps_us: &[u64]) -> Vec<u64> {
+        let mut journal = FrameJournal::create().expect("journal");
+        let jpeg = jpeg_with_size(64, 48);
+        for &ts in timestamps_us {
+            assert!(journal.push(ts, &jpeg).unwrap());
+        }
+        let finished = journal.finish().expect("finish");
+        let mut source = File::open(finished.file.path()).expect("open journal");
+        (0..finished.frames)
+            .map(|_| read_journal_frame(&mut source).expect("frame").0)
+            .collect()
+    }
+
+    #[test]
+    fn journal_keeps_a_lone_frame_after_a_pause() {
+        // the state before, then one paint for the result: both survive
+        assert_eq!(kept_timestamps(&[0, 1_000_000]), vec![0, 1_000_000]);
+    }
+
+    #[test]
+    fn journal_thins_a_burst_but_keeps_how_it_ended() {
+        // 60 Hz burst for 100 ms: one frame per interval, plus the final state
+        let burst: Vec<u64> = (0..7).map(|i| i * 16_667).collect();
+        let kept = kept_timestamps(&burst);
+        assert_eq!(kept.first(), Some(&0));
+        assert_eq!(
+            kept.last(),
+            Some(&100_002),
+            "the burst's last frame is written at finish"
+        );
+        assert!(kept.len() < burst.len(), "a burst is thinned: {kept:?}");
+        for pair in kept.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= DEFAULT_VIDEO_MIN_FRAME_INTERVAL_US || pair[1] == 100_002,
+                "kept frames are an interval apart: {kept:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_keeps_the_frame_a_burst_left_on_screen() {
+        // click → blank at 1.000 s → content at 1.010 s → nothing for 5 s → a
+        // scroll. Skipping by count lost the content frame and showed the blank
+        // one for five seconds; the burst's last frame is kept because it was
+        // on screen far longer than an interval.
+        assert_eq!(
+            kept_timestamps(&[0, 1_000_000, 1_010_000, 6_000_000]),
+            vec![0, 1_000_000, 1_010_000, 6_000_000]
+        );
+        // whereas a frame replaced within an interval is an intermediate: dropped
+        assert_eq!(
+            kept_timestamps(&[0, 1_000_000, 1_010_000, 1_020_000, 1_040_000]),
+            vec![0, 1_000_000, 1_040_000]
+        );
+    }
+
+    #[test]
+    fn journal_interval_zero_keeps_every_frame() {
+        let mut journal = FrameJournal::create()
+            .expect("journal")
+            .with_min_frame_interval_us(0);
+        let jpeg = jpeg_with_size(64, 48);
+        for ts in [0, 1_000, 2_000, 3_000] {
+            assert!(journal.push(ts, &jpeg).unwrap());
+        }
+        assert_eq!(journal.finish().expect("finish").frames, 4);
     }
 
     #[test]
