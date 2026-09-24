@@ -23,10 +23,14 @@ pub const DEFAULT_VIDEO_QUALITY: u32 = 80;
 /// Longest captured edge in CSS pixels. Chromium scales the screencast so
 /// the longer side is at most this (800 keeps a 16:9 clip around 800×450).
 pub const DEFAULT_VIDEO_MAX_WIDTH: u32 = 800;
-/// CDP `Page.startScreencast` has no fps. Chromium emits on compositor paint
-/// (often ~60 Hz when the page is animating). `2` keeps every other paint,
-/// which is ~30 fps from a 60 Hz source.
-pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 2;
+/// CDP `Page.startScreencast` has no fps. Chromium emits a frame only when
+/// the compositor paints, so a still page costs nothing however long the
+/// recording runs, and an animating page runs at its own rate (often ~60 Hz).
+/// Keep every paint: skipping alternate frames made a recording of one
+/// interaction (a click, then one paint for the result) come back as a single
+/// frame, because the result's paint was the skipped one. The frame cap below
+/// still bounds a long animation.
+pub const DEFAULT_VIDEO_EVERY_NTH_FRAME: u32 = 1;
 pub const MAX_VIDEO_FRAMES: u32 = 3_600;
 pub const MAX_VIDEO_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_FALLBACK_WIDTH: u32 = 1280;
@@ -867,13 +871,13 @@ mod tests {
     }
 
     #[test]
-    fn video_options_default_to_800px_and_every_second_frame() {
+    fn video_options_default_to_800px_and_every_frame() {
         assert_eq!(
             VideoStartOptions::default(),
             VideoStartOptions {
                 quality: DEFAULT_VIDEO_QUALITY,
                 max_width: 800,
-                every_nth_frame: 2,
+                every_nth_frame: 1,
             }
         );
         assert_eq!(
