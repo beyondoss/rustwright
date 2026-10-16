@@ -54432,53 +54432,65 @@ fn create_chromium_pipe_fds() -> RwResult<ChromiumPipeFds> {
     })
 }
 
-#[cfg(all(test, unix))]
-fn raw_fd_is_open(fd: RawFd) -> bool {
-    // SAFETY: F_GETFD only queries descriptor flags and does not close `fd`.
-    unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+#[cfg(all(test, target_os = "linux"))]
+fn pipe_inode(fd: RawFd) -> u64 {
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: `fd` is an open descriptor and `stat` is a writable `stat` buffer.
+    let result = unsafe { libc::fstat(fd, &mut stat) };
+    assert_eq!(result, 0, "fstat failed");
+    stat.st_ino
 }
 
-#[cfg(all(test, unix))]
+/// Count live descriptors for `inode` by identity, not by descriptor number.
+/// Parallel tests reuse closed numbers immediately, so `F_GETFD` after `close`
+/// cannot prove that this pipe was released.
+#[cfg(all(test, target_os = "linux"))]
+fn descriptor_count_for_inode(inode: u64) -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("read /proc/self/fd")
+        .filter_map(|entry| {
+            let fd = entry
+                .ok()?
+                .file_name()
+                .to_string_lossy()
+                .parse::<RawFd>()
+                .ok()?;
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            // SAFETY: `fd` came from `/proc/self/fd` and `stat` is writable.
+            // A descriptor that disappears between readdir and fstat is skipped.
+            let still_open = unsafe { libc::fstat(fd, &mut stat) } == 0 && stat.st_ino == inode;
+            still_open.then_some(())
+        })
+        .count()
+}
+
+#[cfg(all(test, target_os = "linux"))]
 #[test]
 fn chromium_pipe_fds_drop_closes_every_end() {
     let pipes = create_chromium_pipe_fds().expect("pipe ends");
-    let owned = [
-        pipes.parent_read,
-        pipes.parent_write,
-        pipes.child_read,
-        pipes.child_write,
-    ];
-    for fd in owned {
-        assert!(raw_fd_is_open(fd), "pipe end {fd} should start open");
-    }
+    let to_child = pipe_inode(pipes.child_read);
+    let from_child = pipe_inode(pipes.parent_read);
+    assert_eq!(descriptor_count_for_inode(to_child), 2);
+    assert_eq!(descriptor_count_for_inode(from_child), 2);
     drop(pipes);
-    for fd in owned {
-        assert!(
-            !raw_fd_is_open(fd),
-            "pipe end {fd} should be closed after drop"
-        );
-    }
+    assert_eq!(descriptor_count_for_inode(to_child), 0);
+    assert_eq!(descriptor_count_for_inode(from_child), 0);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "linux"))]
 #[test]
 fn chromium_pipe_fds_into_parent_files_keeps_parent_ends() {
-    use std::os::unix::io::AsRawFd;
-
     let pipes = create_chromium_pipe_fds().expect("pipe ends");
-    let child_read = pipes.child_read;
-    let child_write = pipes.child_write;
+    let to_child = pipe_inode(pipes.child_read);
+    let from_child = pipe_inode(pipes.parent_read);
     let (read, write) = pipes.into_parent_files();
-    let parent_read = read.as_raw_fd();
-    let parent_write = write.as_raw_fd();
-    assert!(raw_fd_is_open(parent_read));
-    assert!(raw_fd_is_open(parent_write));
-    assert!(!raw_fd_is_open(child_read));
-    assert!(!raw_fd_is_open(child_write));
+    // Each pipe keeps the parent end and loses the child end.
+    assert_eq!(descriptor_count_for_inode(to_child), 1);
+    assert_eq!(descriptor_count_for_inode(from_child), 1);
     drop(read);
     drop(write);
-    assert!(!raw_fd_is_open(parent_read));
-    assert!(!raw_fd_is_open(parent_write));
+    assert_eq!(descriptor_count_for_inode(to_child), 0);
+    assert_eq!(descriptor_count_for_inode(from_child), 0);
 }
 
 #[cfg(unix)]
