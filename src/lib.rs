@@ -54358,22 +54358,35 @@ struct ChromiumPipeFds {
 
 #[cfg(unix)]
 impl ChromiumPipeFds {
-    fn close_all(self) {
-        close_raw_fd(self.parent_read);
-        close_raw_fd(self.parent_write);
-        close_raw_fd(self.child_read);
-        close_raw_fd(self.child_write);
-    }
-
-    fn into_parent_files(self) -> (fs::File, fs::File) {
-        close_raw_fd(self.child_read);
-        close_raw_fd(self.child_write);
+    fn into_parent_files(mut self) -> (fs::File, fs::File) {
+        // Disarm before transferring so `Drop` cannot close the parent ends
+        // a second time. Child ends stay owned and are closed by `Drop`.
+        let parent_read = std::mem::replace(&mut self.parent_read, -1);
+        let parent_write = std::mem::replace(&mut self.parent_write, -1);
         // SAFETY: `parent_read`/`parent_write` are live pipe ends from
         // `create_pipe_pair` that this method uniquely consumes. Ownership
-        // transfers into `File`; the child ends were closed above.
-        let read = unsafe { fs::File::from_raw_fd(self.parent_read) };
-        let write = unsafe { fs::File::from_raw_fd(self.parent_write) };
+        // transfers into `File`; those fields are now the -1 sentinel.
+        let read = unsafe { fs::File::from_raw_fd(parent_read) };
+        let write = unsafe { fs::File::from_raw_fd(parent_write) };
         (read, write)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ChromiumPipeFds {
+    fn drop(&mut self) {
+        // Spawn failure, cancellation before the parent files are taken, and
+        // the child ends left behind by `into_parent_files` all land here.
+        // Ends already transferred to `File` are -1 and are skipped.
+        for fd in [
+            &mut self.parent_read,
+            &mut self.parent_write,
+            &mut self.child_read,
+            &mut self.child_write,
+        ] {
+            close_raw_fd(*fd);
+            *fd = -1;
+        }
     }
 }
 
@@ -54417,6 +54430,55 @@ fn create_chromium_pipe_fds() -> RwResult<ChromiumPipeFds> {
         parent_read: from_child[0],
         child_write: from_child[1],
     })
+}
+
+#[cfg(all(test, unix))]
+fn raw_fd_is_open(fd: RawFd) -> bool {
+    // SAFETY: F_GETFD only queries descriptor flags and does not close `fd`.
+    unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn chromium_pipe_fds_drop_closes_every_end() {
+    let pipes = create_chromium_pipe_fds().expect("pipe ends");
+    let owned = [
+        pipes.parent_read,
+        pipes.parent_write,
+        pipes.child_read,
+        pipes.child_write,
+    ];
+    for fd in owned {
+        assert!(raw_fd_is_open(fd), "pipe end {fd} should start open");
+    }
+    drop(pipes);
+    for fd in owned {
+        assert!(
+            !raw_fd_is_open(fd),
+            "pipe end {fd} should be closed after drop"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn chromium_pipe_fds_into_parent_files_keeps_parent_ends() {
+    use std::os::unix::io::AsRawFd;
+
+    let pipes = create_chromium_pipe_fds().expect("pipe ends");
+    let child_read = pipes.child_read;
+    let child_write = pipes.child_write;
+    let (read, write) = pipes.into_parent_files();
+    let parent_read = read.as_raw_fd();
+    let parent_write = write.as_raw_fd();
+    assert!(raw_fd_is_open(parent_read));
+    assert!(raw_fd_is_open(parent_write));
+    assert!(!raw_fd_is_open(child_read));
+    assert!(!raw_fd_is_open(child_write));
+    drop(read);
+    drop(write);
+    assert!(!raw_fd_is_open(parent_read));
+    assert!(!raw_fd_is_open(parent_write));
 }
 
 #[cfg(unix)]
@@ -54818,16 +54880,16 @@ fn launch_chromium_attempt(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            #[cfg(unix)]
-            if let Some(pipes) = cdp_pipes {
-                pipes.close_all();
-            }
+            // `cdp_pipes`, when this launch opened any, drops on return and
+            // closes the four ends.
             return Err(RwError::Io(error));
         }
     };
     process_guard::register(&child);
     if launch_was_cancelled(cancelled.as_ref()) {
         process_guard::kill_and_unregister(&mut child);
+        // Returning drops `cdp_pipes` (Unix pipe transport) and closes every
+        // end still owned. Previously this path leaked all four descriptors.
         return Err(RwError::Message("browser launch was cancelled".to_string()));
     }
     #[cfg(unix)]
